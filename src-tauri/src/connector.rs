@@ -122,18 +122,24 @@ async fn call_erin(
     auth: &AuthState,
     messages: &[ChatMessage],
 ) -> Result<String, String> {
-    // ERIN uses /api/chat with {"message": "...", "conversation_id": "..."}
-    // Get configurable endpoint
     let base = auth.get_key("erin-endpoint").await
         .unwrap_or_else(|| "http://10.1.1.19:5000".into());
 
-    let prompt = messages.iter()
+    // Build conversation — inject a hard system prompt first so ERIN
+    // stays in conference moderator mode and doesn't hallucinate context
+    let system = "You are ERIN, moderating a Roundtable AI conference. Respond ONLY to what is asked in this specific conversation. Do NOT reference previous sessions, other projects, or invent context. Be direct, concise, and factual. Stay focused on the current question only.";
+
+    let history: Vec<String> = messages.iter()
         .map(|m| {
-            if m.role == "system" { m.content.clone() }
-            else { format!("[{}]: {}", m.role, m.content) }
+            match m.role.as_str() {
+                "system" => format!("[SYSTEM]: {}", m.content),
+                "user" => format!("[User]: {}", m.content),
+                _ => format!("[{}]: {}", m.role, m.content),
+            }
         })
-        .collect::<Vec<_>>()
-        .join("\n\n");
+        .collect();
+
+    let prompt = format!("[SYSTEM]: {}\n\n{}", system, history.join("\n\n"));
 
     let resp: serde_json::Value = client
         .post(format!("{}/api/chat", base))

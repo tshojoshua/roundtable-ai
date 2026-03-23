@@ -632,21 +632,20 @@ const PROVIDERS = [
 let selectedModels = {}
 let configValues = {}
 
+async function getConfig(key, def = '') {
+  try {
+    const v = await invoke('get_config_value', { key })
+    return (v && v !== 'null') ? v : def
+  } catch(e) { return def }
+}
+
 async function loadProviderConfigs() {
   for (const p of PROVIDERS) {
-    // Load selected model
-    try {
-      const m = await invoke('get_config_value', { key: `model-${p.id}` })
-      if (m) selectedModels[p.id] = m
-      else if (p.models?.length > 0) selectedModels[p.id] = p.models[0].id
-    } catch(e) {}
-    // Load config keys
+    const def = p.models?.length > 0 ? p.models[0].id : ''
+    selectedModels[p.id] = await getConfig(`model-${p.id}`, def)
     if (p.configKeys) {
       for (const ck of p.configKeys) {
-        try {
-          const v = await invoke('get_config_value', { key: ck.key })
-          configValues[ck.key] = v || ck.default || ''
-        } catch(e) { configValues[ck.key] = ck.default || '' }
+        configValues[ck.key] = await getConfig(ck.key, ck.default || '')
       }
     }
   }
@@ -654,8 +653,10 @@ async function loadProviderConfigs() {
 
 function renderProviders() {
   const list = document.getElementById('providers-list')
+  if (!list) { console.error('providers-list not found'); return }
   list.innerHTML = ''
   PROVIDERS.forEach(p => {
+    try {
     const s = providerStatuses[p.id]
     const hasKey = p.noKey || s?.has_key
     const card = document.createElement('div')
@@ -749,6 +750,7 @@ function renderProviders() {
       ${authHtml}`
 
     list.appendChild(card)
+    } catch(cardErr) { console.error('Error rendering provider', p.id, cardErr) }
 
     // Model select handler
     const sel = card.querySelector('.model-select')
