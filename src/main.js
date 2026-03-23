@@ -326,10 +326,41 @@ newInput.addEventListener('keydown', async e => {
     newInput.value = ''
     newForm.style.display = 'none'
     try {
+      // Build participant list from selected models (skip providers with no key)
+      const statuses = await invoke('get_auth_status').catch(() => [])
+      const hasKey = {}
+      statuses.forEach(s => hasKey[s.provider_id] = s.has_key)
+
+      const participants = []
+      // ERIN always included (local, no key needed)
+      const erinModel = await invoke('get_config_value', { key: 'model-erin' }).catch(() => 'erin') || 'erin'
+      participants.push(erinModel)
+      // Cloud providers — only if key set
+      const cloudProviders = [
+        { id: 'anthropic', fallback: 'claude-opus-4-5' },
+        { id: 'anthropic-web', fallback: 'claude-web' },
+        { id: 'xai', fallback: 'grok-3' },
+        { id: 'xai-web', fallback: 'grok-web' },
+        { id: 'google', fallback: 'gemini-2.5-pro' },
+        { id: 'openai', fallback: 'gpt-4o' },
+        { id: 'github-copilot', fallback: 'github/gpt-4o' },
+        { id: 'mistral', fallback: 'mistral-large-latest' },
+      ]
+      for (const cp of cloudProviders) {
+        if (hasKey[cp.id]) {
+          const m = await invoke('get_config_value', { key: `model-${cp.id}` }).catch(() => null)
+          participants.push(m || cp.fallback)
+        }
+      }
+      // If only ERIN, add a note
+      if (participants.length === 1) {
+        alert('Only ERIN is available — go to ⚙️ Providers to add API keys for Claude, Grok, Gemini etc.')
+      }
+
       await invoke('create_room', {
         roomId: name,
-        participants: ['claude-opus-4-5', 'grok-3', 'gemini-2.5-pro', 'erin'],
-        moderatorModel: 'erin',
+        participants,
+        moderatorModel: erinModel,
         mode: 'moderator'
       })
       await loadRooms()
@@ -486,63 +517,139 @@ async function initEvents() {
 
 // ── Settings ──
 const PROVIDERS = [
-  { id: 'erin', label: 'ERIN (Local AGI)', icon: '🔴', note: 'Your local AGI on Transformers at 10.1.1.19:5000. No key needed.', noKey: true },
-  { id: 'anthropic', label: 'Claude (API Key)', icon: '🟠', note: 'API key from console.anthropic.com', placeholder: 'sk-ant-api03-...' },
-  { id: 'anthropic-web', label: 'Claude (Desktop Session)', icon: '🟠', note: 'Import session from Claude Desktop app', session: true },
-  { id: 'xai', label: 'Grok (API Key)', icon: '🟣', note: 'API key from console.x.ai', placeholder: 'xai-...' },
-  { id: 'xai-web', label: 'Grok (Desktop Session)', icon: '🟣', note: 'Import session from Grok Desktop app', session: true },
-  { id: 'google', label: 'Gemini', icon: '🟢', note: 'Free API key from aistudio.google.com', placeholder: 'AIzaSy...' },
-  { id: 'openai', label: 'OpenAI', icon: '⚫', note: 'API key from platform.openai.com', placeholder: 'sk-proj-...' },
-  { id: 'github-copilot', label: 'GitHub Copilot', icon: '⚪', note: 'PAT with copilot scope from github.com/settings/tokens', placeholder: 'github_pat_...' },
+  {
+    id: 'erin', label: 'ERIN', subtitle: 'Local AGI — Transformers', icon: '🔴',
+    noKey: true,
+    note: 'Your local AGI running Qwen2.5-Omni on Transformers at 10.1.1.19:5000. No API key needed.',
+    models: [
+      { id: 'erin', label: 'ERIN (default)' },
+      { id: 'erin-v1-12b-q4km', label: 'erin-v1-12b-q4km' },
+    ],
+    configKeys: [
+      { key: 'erin-endpoint', label: 'Endpoint', placeholder: 'http://10.1.1.19:5000', default: 'http://10.1.1.19:5000' }
+    ]
+  },
+  {
+    id: 'anthropic', label: 'Claude', subtitle: 'Anthropic API', icon: '🟠',
+    placeholder: 'sk-ant-api03-...',
+    note: 'API key from console.anthropic.com — separate from Claude Pro subscription.',
+    consoleUrl: 'https://console.anthropic.com/settings/keys',
+    models: [
+      { id: 'claude-opus-4-5', label: 'Claude Opus 4.5 (most capable)' },
+      { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (fast)' },
+      { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (cheapest)' },
+      { id: 'claude-opus-4-0', label: 'Claude Opus 4' },
+      { id: 'claude-sonnet-3-7', label: 'Claude Sonnet 3.7' },
+    ]
+  },
+  {
+    id: 'anthropic-web', label: 'Claude', subtitle: 'Desktop Session', icon: '🟠',
+    session: true,
+    note: 'Uses your Claude Desktop session — no API cost. Import from the banner above.',
+    models: [
+      { id: 'claude-web', label: 'Claude (web session)' },
+    ]
+  },
+  {
+    id: 'xai', label: 'Grok', subtitle: 'xAI API', icon: '🟣',
+    placeholder: 'xai-...',
+    note: 'API key from console.x.ai — separate from SuperGrok subscription.',
+    consoleUrl: 'https://console.x.ai/',
+    models: [
+      { id: 'grok-3', label: 'Grok 3 (most capable)' },
+      { id: 'grok-3-mini', label: 'Grok 3 Mini (fast)' },
+      { id: 'grok-2', label: 'Grok 2' },
+    ]
+  },
+  {
+    id: 'xai-web', label: 'Grok', subtitle: 'Desktop Session', icon: '🟣',
+    session: true,
+    note: 'Uses your Grok Desktop session — uses your SuperGrok subscription.',
+    models: [
+      { id: 'grok-web', label: 'Grok (web session)' },
+    ]
+  },
+  {
+    id: 'google', label: 'Gemini', subtitle: 'Google AI Studio', icon: '🟢',
+    placeholder: 'AIzaSy...',
+    note: 'Free API key from aistudio.google.com — rate limited but no cost.',
+    consoleUrl: 'https://aistudio.google.com/app/apikey',
+    models: [
+      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (best)' },
+      { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash (fast)' },
+      { id: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
+      { id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
+    ]
+  },
+  {
+    id: 'openai', label: 'OpenAI', subtitle: 'GPT / o-series', icon: '⚫',
+    placeholder: 'sk-proj-...',
+    note: 'API key from platform.openai.com — separate from ChatGPT Plus.',
+    consoleUrl: 'https://platform.openai.com/api-keys',
+    models: [
+      { id: 'gpt-4o', label: 'GPT-4o' },
+      { id: 'gpt-4o-mini', label: 'GPT-4o Mini (cheap)' },
+      { id: 'o3-mini', label: 'o3-mini (reasoning)' },
+      { id: 'o4-mini', label: 'o4-mini (reasoning)' },
+    ]
+  },
+  {
+    id: 'github-copilot', label: 'GitHub Copilot', subtitle: 'Subscription models', icon: '⚪',
+    placeholder: 'github_pat_...',
+    note: 'PAT with copilot scope. Gives access to GPT-4o, Claude, and more through your Copilot subscription.',
+    consoleUrl: 'https://github.com/settings/tokens/new?scopes=copilot',
+    models: [
+      { id: 'github/gpt-4o', label: 'GPT-4o via Copilot' },
+      { id: 'github/claude-3-5-sonnet', label: 'Claude 3.5 Sonnet via Copilot' },
+      { id: 'github/o3-mini', label: 'o3-mini via Copilot' },
+    ]
+  },
+  {
+    id: 'mistral', label: 'Mistral AI', subtitle: 'La Plateforme', icon: '🟡',
+    placeholder: 'mistral-...',
+    note: 'API key from console.mistral.ai.',
+    consoleUrl: 'https://console.mistral.ai/api-keys',
+    models: [
+      { id: 'mistral-large-latest', label: 'Mistral Large' },
+      { id: 'mistral-medium-latest', label: 'Mistral Medium' },
+      { id: 'mistral-small-latest', label: 'Mistral Small (cheap)' },
+      { id: 'codestral-latest', label: 'Codestral (code)' },
+    ]
+  },
+  {
+    id: 'ollama', label: 'Ollama', subtitle: 'Local — configurable', icon: '🔵',
+    noKey: true,
+    note: 'Local Ollama instance. Set endpoint and model below.',
+    models: [],
+    configKeys: [
+      { key: 'ollama-endpoint', label: 'Endpoint', placeholder: 'http://localhost:11434', default: 'http://localhost:11434' },
+      { key: 'ollama-model', label: 'Model', placeholder: 'llama3.2', default: 'llama3.2' },
+    ]
+  },
 ]
 
-let providerStatuses = {}
+// Track which model is selected per provider
+let selectedModels = {}
+let configValues = {}
 
-async function loadSettings() {
-  try {
-    const list = await invoke('get_auth_status')
-    providerStatuses = {}
-    list.forEach(s => providerStatuses[s.provider_id] = s)
-  } catch(e) {}
-
-  // Check for installed apps
-  try {
-    const apps = await invoke('check_installed_apps')
-    const banner = document.getElementById('import-banner')
-    const btns = document.getElementById('import-btns')
-    btns.innerHTML = ''
-    if (apps.claude_desktop || apps.grok_desktop) {
-      banner.style.display = 'block'
-      if (apps.claude_desktop) {
-        const b = document.createElement('button')
-        b.className = 'card-btn'
-        b.style.background = '#92400e'
-        b.textContent = '🟠 Import Claude Session'
-        b.onclick = async () => {
-          const r = await invoke('import_claude_session')
-          document.getElementById('import-result').textContent = r.message
-          document.getElementById('import-result').style.color = r.success ? '#10b981' : '#ef4444'
-          loadSettings()
-        }
-        btns.appendChild(b)
-      }
-      if (apps.grok_desktop) {
-        const b = document.createElement('button')
-        b.className = 'card-btn'
-        b.style.background = '#3730a3'
-        b.textContent = '🟣 Import Grok Session'
-        b.onclick = async () => {
-          const r = await invoke('import_grok_session')
-          document.getElementById('import-result').textContent = r.message
-          document.getElementById('import-result').style.color = r.success ? '#10b981' : '#ef4444'
-          loadSettings()
-        }
-        btns.appendChild(b)
+async function loadProviderConfigs() {
+  for (const p of PROVIDERS) {
+    // Load selected model
+    try {
+      const m = await invoke('get_config_value', { key: `model-${p.id}` })
+      if (m) selectedModels[p.id] = m
+      else if (p.models?.length > 0) selectedModels[p.id] = p.models[0].id
+    } catch(e) {}
+    // Load config keys
+    if (p.configKeys) {
+      for (const ck of p.configKeys) {
+        try {
+          const v = await invoke('get_config_value', { key: ck.key })
+          configValues[ck.key] = v || ck.default || ''
+        } catch(e) { configValues[ck.key] = ck.default || '' }
       }
     }
-  } catch(e) {}
-
-  renderProviders()
+  }
 }
 
 function renderProviders() {
@@ -550,86 +657,164 @@ function renderProviders() {
   list.innerHTML = ''
   PROVIDERS.forEach(p => {
     const s = providerStatuses[p.id]
-    const hasKey = s?.has_key
+    const hasKey = p.noKey || s?.has_key
     const card = document.createElement('div')
-    card.className = 'provider-card' + (hasKey ? ' has-key' : '')
+    card.className = 'provider-card'
+    // Dim card if no key and not a no-key provider
+    if (!hasKey) card.style.opacity = '0.55'
+    if (hasKey && !p.noKey) card.style.borderColor = '#1e4033'
 
-    let inputsHtml = ''
+    // Model selector HTML
+    let modelHtml = ''
+    if (p.models && p.models.length > 0) {
+      const opts = p.models.map(m =>
+        `<option value="${m.id}" ${selectedModels[p.id] === m.id ? 'selected' : ''}>${m.label}</option>`
+      ).join('')
+      modelHtml = `
+        <div style="margin-top:10px">
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Active model</label>
+          <select class="model-select" data-provider="${p.id}"
+            style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:7px 10px;color:${hasKey ? 'var(--text)' : 'var(--muted)'};font-size:13px;outline:none"
+            ${!hasKey ? 'disabled' : ''}>
+            ${opts}
+          </select>
+        </div>`
+    }
+
+    // Config keys HTML
+    let configHtml = ''
+    if (p.configKeys) {
+      configHtml = p.configKeys.map(ck => `
+        <div style="margin-top:10px">
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">${ck.label}</label>
+          <div style="display:flex;gap:8px">
+            <input class="config-input" data-key="${ck.key}" value="${configValues[ck.key] || ck.default || ''}"
+              placeholder="${ck.placeholder}"
+              style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:7px 10px;color:var(--text);font-size:13px;outline:none;font-family:monospace"/>
+            <button class="card-btn config-save-btn" data-key="${ck.key}" style="font-size:12px;padding:6px 12px">Set</button>
+          </div>
+        </div>`).join('')
+    }
+
+    // Key input / session HTML
+    let authHtml = ''
     if (!p.noKey && !p.session) {
-      inputsHtml = `
-        <div class="card-inputs">
-          <input type="password" id="input-${p.id}" placeholder="${hasKey ? '••••• (set — paste new to update)' : (p.placeholder || '')}"/>
-          <button class="card-btn" id="save-${p.id}">Save</button>
-        </div>
-        <div class="card-actions">
-          ${hasKey ? `<button class="card-btn secondary" id="test-${p.id}">🔌 Test</button><button class="card-btn secondary" id="del-${p.id}" style="color:#ef4444">🗑</button>` : ''}
-        </div>
-        <div class="card-test-result" id="result-${p.id}"></div>`
+      authHtml = `
+        <div style="margin-top:12px">
+          <div class="card-inputs">
+            ${p.consoleUrl ? `<button class="card-btn secondary" onclick="window.__openConsole('${p.id}')" style="font-size:12px;padding:7px 12px">🔑 Get Key</button>` : ''}
+            <input type="password" id="input-${p.id}"
+              placeholder="${s?.has_key ? '••••• (set — paste to update)' : (p.placeholder || 'API key')}"
+              style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:7px 10px;color:var(--text);font-size:13px;outline:none;font-family:monospace"/>
+            <button class="card-btn" id="save-${p.id}" style="font-size:12px;padding:7px 14px">Save</button>
+          </div>
+          ${s?.has_key ? `
+          <div class="card-actions" style="margin-top:8px">
+            <button class="card-btn secondary" id="test-${p.id}" style="font-size:12px">🔌 Test</button>
+            <button class="card-btn secondary" id="del-${p.id}" style="font-size:12px;color:#ef4444">🗑 Remove</button>
+          </div>` : ''}
+          <div class="card-test-result" id="result-${p.id}"></div>
+        </div>`
+    } else if (p.session) {
+      authHtml = s?.has_key
+        ? `<div style="margin-top:8px;display:flex;align-items:center;gap:12px">
+             <span style="font-size:12px;color:var(--green)">✅ Session active</span>
+             <button class="card-btn secondary" id="del-${p.id}" style="font-size:12px;color:#ef4444">Clear</button>
+             <button class="card-btn secondary" id="test-${p.id}" style="font-size:12px">🔌 Test</button>
+           </div>
+           <div class="card-test-result" id="result-${p.id}"></div>`
+        : `<div style="margin-top:8px;font-size:12px;color:var(--muted)">Use the import button at the top of this page</div>`
     } else if (p.noKey) {
-      inputsHtml = `
-        <div class="card-actions">
-          <button class="card-btn secondary" id="test-${p.id}">🔌 Test Connection</button>
-        </div>
-        <div class="card-test-result" id="result-${p.id}"></div>`
-    } else {
-      // session
-      inputsHtml = hasKey
-        ? `<div style="font-size:12px;color:var(--green)">✅ Session active</div>
-           <button class="card-btn secondary" id="del-${p.id}" style="margin-top:8px;color:#ef4444;font-size:12px">Clear session</button>`
-        : `<div style="font-size:12px;color:var(--muted)">Use Import button above</div>`
+      authHtml = `
+        <div style="margin-top:8px">
+          <button class="card-btn secondary" id="test-${p.id}" style="font-size:12px">🔌 Test Connection</button>
+          <div class="card-test-result" id="result-${p.id}"></div>
+        </div>`
     }
 
     card.innerHTML = `
       <div class="card-header">
         <div class="card-title">
           <span class="icon">${p.icon}</span>
-          <div><h3>${p.label}</h3></div>
+          <div>
+            <h3>${p.label}</h3>
+            <small style="color:var(--muted)">${p.subtitle}</small>
+          </div>
         </div>
-        <span class="card-badge ${hasKey ? 'badge-set' : 'badge-none'}">${hasKey ? '✓ Set' : 'Not set'}</span>
+        <span class="card-badge ${hasKey ? 'badge-set' : 'badge-none'}">${hasKey ? (p.noKey ? 'Local' : '✓ Set') : 'No key'}</span>
       </div>
       <div class="card-note">${p.note}</div>
-      ${inputsHtml}`
+      ${modelHtml}
+      ${configHtml}
+      ${authHtml}`
+
     list.appendChild(card)
 
-    // Attach events
+    // Model select handler
+    const sel = card.querySelector('.model-select')
+    if (sel) {
+      sel.addEventListener('change', async () => {
+        selectedModels[p.id] = sel.value
+        await invoke('save_config_value', { key: `model-${p.id}`, value: sel.value })
+      })
+    }
+
+    // Config save buttons
+    card.querySelectorAll('.config-save-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const key = btn.dataset.key
+        const inp = card.querySelector(`.config-input[data-key="${key}"]`)
+        if (!inp) return
+        configValues[key] = inp.value.trim()
+        await invoke('save_config_value', { key, value: inp.value.trim() })
+        btn.textContent = '✓'
+        setTimeout(() => btn.textContent = 'Set', 1500)
+      })
+    })
+
+    // Save key
     const saveBtn = document.getElementById(`save-${p.id}`)
     if (saveBtn) {
       saveBtn.addEventListener('click', async () => {
-        const key = document.getElementById(`input-${p.id}`).value.trim()
+        const inp = document.getElementById(`input-${p.id}`)
+        const key = inp?.value.trim()
         if (!key) return
         try {
           await invoke('save_api_key', { providerId: p.id, apiKey: key })
-          document.getElementById(`input-${p.id}`).value = ''
-          loadSettings()
+          await loadSettings()
         } catch(e) { alert('Error: ' + e) }
       })
     }
 
+    // Test
     const testBtn = document.getElementById(`test-${p.id}`)
     if (testBtn) {
       testBtn.addEventListener('click', async () => {
         const el = document.getElementById(`result-${p.id}`)
-        el.textContent = 'Testing...'
-        el.className = 'card-test-result'
+        if (el) { el.textContent = 'Testing...'; el.className = 'card-test-result' }
         try {
           const msg = await invoke('test_connection', { providerId: p.id })
-          el.textContent = msg
-          el.className = 'card-test-result result-ok'
+          if (el) { el.textContent = msg; el.className = 'card-test-result result-ok' }
         } catch(e) {
-          el.textContent = String(e)
-          el.className = 'card-test-result result-err'
+          if (el) { el.textContent = String(e); el.className = 'card-test-result result-err' }
         }
       })
     }
 
+    // Delete
     const delBtn = document.getElementById(`del-${p.id}`)
     if (delBtn) {
       delBtn.addEventListener('click', async () => {
         await invoke('delete_api_key', { providerId: p.id })
-        loadSettings()
+        await loadSettings()
       })
     }
   })
+}
+
+window.__openConsole = async (pid) => {
+  try { await invoke('open_console', { providerId: pid }) }
+  catch(e) { console.error(e) }
 }
 
 // ── MCP ──
