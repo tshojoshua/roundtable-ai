@@ -814,6 +814,52 @@ function renderProviders() {
   })
 }
 
+
+async function loadSettings() {
+  try { await loadProviderConfigs() } catch(e) { console.error('loadProviderConfigs:', e) }
+  try {
+    const list = await invoke('get_auth_status')
+    providerStatuses = {}
+    list.forEach(s => { providerStatuses[s.provider_id] = s })
+  } catch(e) { console.error('get_auth_status:', e) }
+
+  try {
+    const apps = await invoke('check_installed_apps')
+    const banner = document.getElementById('import-banner')
+    const btns = document.getElementById('import-btns')
+    if (banner && btns && (apps.claude_desktop || apps.grok_desktop)) {
+      banner.style.display = 'block'
+      btns.innerHTML = ''
+      if (apps.claude_desktop) {
+        const b = document.createElement('button')
+        b.className = 'card-btn'; b.style.background = '#92400e'
+        b.textContent = (apps.claude_logged_in ? 'Re-import' : 'Import') + ' 🟠 Claude Session'
+        b.onclick = async () => {
+          const r = await invoke('import_claude_session')
+          const el = document.getElementById('import-result')
+          if (el) { el.textContent = r.message; el.style.color = r.success ? '#10b981' : '#ef4444' }
+          loadSettings()
+        }
+        btns.appendChild(b)
+      }
+      if (apps.grok_desktop) {
+        const b = document.createElement('button')
+        b.className = 'card-btn'; b.style.background = '#3730a3'
+        b.textContent = (apps.grok_logged_in ? 'Re-import' : 'Import') + ' 🟣 Grok Session'
+        b.onclick = async () => {
+          const r = await invoke('import_grok_session')
+          const el = document.getElementById('import-result')
+          if (el) { el.textContent = r.message; el.style.color = r.success ? '#10b981' : '#ef4444' }
+          loadSettings()
+        }
+        btns.appendChild(b)
+      }
+    }
+  } catch(e) { /* no desktop apps detected */ }
+
+  try { renderProviders() } catch(e) { console.error('renderProviders:', e) }
+}
+
 window.__openConsole = async (pid) => {
   try { await invoke('open_console', { providerId: pid }) }
   catch(e) { console.error(e) }
