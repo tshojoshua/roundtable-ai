@@ -112,6 +112,7 @@ app.innerHTML = `
   <nav id="nav">
     <div class="logo">R</div>
     <a class="active" data-page="conf" title="Roundtable">🎙️</a>
+    <a data-page="mcp" title="MCP Servers">🔌</a>
     <a data-page="settings" title="Providers">⚙️</a>
   </nav>
   <div id="content">
@@ -171,6 +172,37 @@ app.innerHTML = `
         <div id="providers-list"></div>
       </div>
     </div>
+  <!-- MCP Page -->
+    <div class="page" id="page-mcp">
+      <div id="settings-page">
+        <div class="settings-header">
+          <h1>🔌 MCP Connectors</h1>
+          <p>Model Context Protocol servers — give ERIN tools like web search, file access, databases.</p>
+        </div>
+        <div id="mcp-list"></div>
+        <div style="margin-top:16px;max-width:640px">
+          <button class="card-btn" id="add-mcp-btn" style="margin-bottom:16px">+ Add Server</button>
+          <div id="add-mcp-form" style="display:none;background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:16px">
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <input id="mcp-name" placeholder="Name (e.g. Filesystem)" style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:8px 12px;color:var(--text);font-size:13px;outline:none"/>
+              <select id="mcp-type" style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:8px 12px;color:var(--text);font-size:13px;outline:none">
+                <option value="stdio">stdio (command)</option>
+                <option value="http">HTTP/SSE (url)</option>
+              </select>
+              <input id="mcp-command" placeholder="Command (e.g. npx -y @modelcontextprotocol/server-fetch)" style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;font-family:monospace"/>
+              <div style="display:flex;gap:8px">
+                <button class="card-btn" id="mcp-save-btn">Add</button>
+                <button class="card-btn secondary" id="mcp-cancel-btn">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:12px;padding:16px;max-width:640px;font-size:12px;color:var(--muted);line-height:1.7">
+          <strong style="color:var(--text)">Quick add presets:</strong><br/>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px" id="mcp-presets"></div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 `
@@ -185,6 +217,7 @@ document.querySelectorAll('#nav a').forEach(a => {
     a.classList.add('active')
     document.getElementById(`page-${page}`).classList.add('active')
     if (page === 'settings') loadSettings()
+    if (page === 'mcp') loadMCP()
   })
 })
 
@@ -598,6 +631,99 @@ function renderProviders() {
     }
   })
 }
+
+// ── MCP ──
+const MCP_PRESETS = [
+  { name: 'Fetch/Web', command: 'npx -y @modelcontextprotocol/server-fetch' },
+  { name: 'Filesystem', command: 'npx -y @modelcontextprotocol/server-filesystem /' },
+  { name: 'Git', command: 'npx -y @modelcontextprotocol/server-git' },
+  { name: 'Postgres', command: 'npx -y @modelcontextprotocol/server-postgres postgresql://localhost/mydb' },
+  { name: 'ERIN Memory', command: 'http://10.1.1.19:5456', type: 'http' },
+]
+
+async function loadMCP() {
+  let servers = []
+  try {
+    const raw = await invoke('get_config_value', { key: 'mcp-servers' })
+    if (raw) servers = JSON.parse(raw)
+  } catch(e) {}
+
+  // Always show local-system as first entry
+  const list = document.getElementById('mcp-list')
+  list.innerHTML = ''
+  const builtIn = {
+    id: 'local-system', name: 'Local System (built-in)', type: 'stdio',
+    command: 'node /opt/mcp-local-server/dist/index.js',
+    enabled: true, builtin: true,
+    desc: 'File system, processes, Docker, cron — already connected'
+  }
+  ;[builtIn, ...servers].forEach(s => {
+    const div = document.createElement('div')
+    div.className = 'provider-card' + (s.enabled ? ' has-key' : '')
+    div.innerHTML = `
+      <div class="card-header">
+        <div class="card-title">
+          <span class="icon">${s.type === 'http' ? '🌐' : '⚡'}</span>
+          <div><h3>${s.name}</h3><small>${s.desc || s.command || ''}</small></div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="card-badge ${s.enabled ? 'badge-set' : 'badge-none'}">${s.type.toUpperCase()}</span>
+          ${!s.builtin ? `<button onclick="deleteMCP('${s.id}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px">✕</button>` : ''}
+        </div>
+      </div>`
+    list.appendChild(div)
+  })
+
+  // Presets
+  const presets = document.getElementById('mcp-presets')
+  if (presets && presets.children.length === 0) {
+    MCP_PRESETS.forEach(p => {
+      const b = document.createElement('button')
+      b.className = 'card-btn secondary'
+      b.style.fontSize = '12px'
+      b.textContent = '+ ' + p.name
+      b.onclick = () => addMCPPreset(p, servers)
+      presets.appendChild(b)
+    })
+  }
+}
+
+window.deleteMCP = async function(id) {
+  const raw = await invoke('get_config_value', { key: 'mcp-servers' }).catch(() => null)
+  const servers = raw ? JSON.parse(raw).filter(s => s.id !== id) : []
+  await invoke('save_config_value', { key: 'mcp-servers', value: JSON.stringify(servers) })
+  loadMCP()
+}
+
+async function addMCPPreset(p, existing) {
+  const servers = [...existing, {
+    id: 'mcp-' + Date.now(), name: p.name,
+    type: p.type || 'stdio', command: p.command, enabled: true
+  }]
+  await invoke('save_config_value', { key: 'mcp-servers', value: JSON.stringify(servers) })
+  loadMCP()
+}
+
+document.getElementById('add-mcp-btn').addEventListener('click', () => {
+  document.getElementById('add-mcp-form').style.display = 'block'
+})
+document.getElementById('mcp-cancel-btn').addEventListener('click', () => {
+  document.getElementById('add-mcp-form').style.display = 'none'
+})
+document.getElementById('mcp-save-btn').addEventListener('click', async () => {
+  const name = document.getElementById('mcp-name').value.trim()
+  const type = document.getElementById('mcp-type').value
+  const command = document.getElementById('mcp-command').value.trim()
+  if (!name || !command) return
+  const raw = await invoke('get_config_value', { key: 'mcp-servers' }).catch(() => null)
+  const servers = raw ? JSON.parse(raw) : []
+  servers.push({ id: 'mcp-' + Date.now(), name, type, command, enabled: true })
+  await invoke('save_config_value', { key: 'mcp-servers', value: JSON.stringify(servers) })
+  document.getElementById('add-mcp-form').style.display = 'none'
+  document.getElementById('mcp-name').value = ''
+  document.getElementById('mcp-command').value = ''
+  loadMCP()
+})
 
 // ── Init ──
 async function init() {
