@@ -298,9 +298,10 @@ document.getElementById('nri').addEventListener('keydown',async e=>{
     const hk={}; statuses.forEach(s=>hk[s.provider_id]=s.has_key)
     const parts=[]
     const em=await gcfg('model-erin','erin'); parts.push(em)
+    // Web sessions (claude-web, grok-web) blocked by Cloudflare — API keys only
     const cloud=[
-      {id:'anthropic',fb:'claude-opus-4-5'},{id:'anthropic-web',fb:'claude-web'},
-      {id:'xai',fb:'grok-3'},{id:'xai-web',fb:'grok-web'},
+      {id:'anthropic',fb:'claude-opus-4-5'},
+      {id:'xai',fb:'grok-3'},
       {id:'google',fb:'gemini-2.5-pro'},{id:'openai',fb:'gpt-4o'},
       {id:'github-copilot',fb:'github/gpt-4o'},{id:'mistral',fb:'mistral-large-latest'},
     ]
