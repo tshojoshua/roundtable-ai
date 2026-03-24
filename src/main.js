@@ -1,968 +1,574 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
-// ── State ──
-let rooms = []
-let activeRoom = null
-let messages = []
-let streamBuffers = {}
-let isGenerating = false
+let rooms=[], activeRoom=null, messages=[], streamBuffers={}, isGenerating=false
+let providerStatuses={}, selectedModels={}, configValues={}
 
-// ── DOM ──
-const app = document.getElementById('app')
-app.innerHTML = `
-<style>
-  :root { --bg: #030712; --bg2: #0f172a; --bg3: #1e293b; --border: #334155; --text: #f1f5f9; --muted: #64748b; --indigo: #6366f1; --indigo2: #4f46e5; --red: #ef4444; --green: #10b981; }
-  * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--text); font-family: system-ui,-apple-system,sans-serif; }
-  #layout { display: flex; height: 100vh; overflow: hidden; }
-  #nav { width: 56px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 8px; flex-shrink: 0; }
-  #nav .logo { width: 36px; height: 36px; background: var(--indigo); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 14px; margin-bottom: 8px; }
-  #nav a { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 20px; cursor: pointer; text-decoration: none; color: var(--text); transition: background 0.15s; }
-  #nav a:hover { background: var(--bg3); }
-  #nav a.active { background: var(--indigo); }
-  #content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
-  .page { display: none; flex: 1; flex-direction: column; overflow: hidden; }
-  .page.active { display: flex; }
+const PROVIDERS = [
+  { id:'erin', label:'ERIN', subtitle:'Local AGI — Transformers', icon:'🔴', noKey:true,
+    note:'Your local AGI on Transformers at 10.1.1.19:5000. No API key needed.',
+    models:[{id:'erin',label:'ERIN (default)'},{id:'erin-v1-12b-q4km',label:'erin-v1-12b-q4km'}],
+    configKeys:[{key:'erin-endpoint',label:'Endpoint',placeholder:'http://10.1.1.19:5000',def:'http://10.1.1.19:5000'}] },
+  { id:'anthropic', label:'Claude', subtitle:'Anthropic API', icon:'🟠',
+    placeholder:'sk-ant-api03-...', note:'API key from console.anthropic.com',
+    consoleUrl:'https://console.anthropic.com/settings/keys',
+    models:[{id:'claude-opus-4-5',label:'Claude Opus 4.5'},{id:'claude-sonnet-4-5',label:'Claude Sonnet 4.5'},{id:'claude-haiku-4-5',label:'Claude Haiku 4.5 (cheap)'}] },
+  { id:'anthropic-web', label:'Claude', subtitle:'Desktop Session', icon:'🟠', session:true,
+    note:'Uses your Claude Desktop session — no API cost.',
+    models:[{id:'claude-web',label:'Claude (web session)'}] },
+  { id:'xai', label:'Grok', subtitle:'xAI API', icon:'🟣',
+    placeholder:'xai-...', note:'API key from console.x.ai',
+    consoleUrl:'https://console.x.ai/',
+    models:[{id:'grok-3',label:'Grok 3'},{id:'grok-3-mini',label:'Grok 3 Mini (fast)'}] },
+  { id:'xai-web', label:'Grok', subtitle:'Desktop Session', icon:'🟣', session:true,
+    note:'Uses your Grok Desktop session.',
+    models:[{id:'grok-web',label:'Grok (web session)'}] },
+  { id:'google', label:'Gemini', subtitle:'Google AI Studio', icon:'🟢',
+    placeholder:'AIzaSy...', note:'Free API key from aistudio.google.com',
+    consoleUrl:'https://aistudio.google.com/app/apikey',
+    models:[{id:'gemini-2.5-pro',label:'Gemini 2.5 Pro'},{id:'gemini-2.0-flash',label:'Gemini 2.0 Flash (fast)'},{id:'gemini-1.5-pro',label:'Gemini 1.5 Pro'}] },
+  { id:'openai', label:'OpenAI', subtitle:'GPT / o-series', icon:'⚫',
+    placeholder:'sk-proj-...', note:'API key from platform.openai.com',
+    consoleUrl:'https://platform.openai.com/api-keys',
+    models:[{id:'gpt-4o',label:'GPT-4o'},{id:'gpt-4o-mini',label:'GPT-4o Mini (cheap)'},{id:'o3-mini',label:'o3-mini (reasoning)'}] },
+  { id:'github-copilot', label:'GitHub Copilot', subtitle:'Subscription models', icon:'⚪',
+    placeholder:'github_pat_...', note:'PAT with copilot scope — access GPT-4o, Claude, o3 via subscription.',
+    consoleUrl:'https://github.com/settings/tokens/new?scopes=copilot',
+    models:[{id:'github/gpt-4o',label:'GPT-4o via Copilot'},{id:'github/claude-3-5-sonnet',label:'Claude 3.5 via Copilot'},{id:'github/o3-mini',label:'o3-mini via Copilot'}] },
+  { id:'mistral', label:'Mistral AI', subtitle:'La Plateforme', icon:'🟡',
+    placeholder:'mistral-...', note:'API key from console.mistral.ai',
+    consoleUrl:'https://console.mistral.ai/api-keys',
+    models:[{id:'mistral-large-latest',label:'Mistral Large'},{id:'mistral-small-latest',label:'Mistral Small (cheap)'}] },
+  { id:'ollama', label:'Ollama', subtitle:'Local — configurable', icon:'🔵', noKey:true,
+    note:'Local Ollama. Set endpoint and model below.',
+    models:[],
+    configKeys:[{key:'ollama-endpoint',label:'Endpoint',placeholder:'http://localhost:11434',def:'http://localhost:11434'},{key:'ollama-model',label:'Model',placeholder:'llama3.2',def:'llama3.2'}] },
+]
 
-  /* Conference */
-  #conf-inner { display: flex; height: 100%; overflow: hidden; }
-  #rooms-panel { width: 200px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
-  #rooms-header { padding: 12px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
-  #rooms-header span { font-weight: 600; font-size: 13px; }
-  #add-room-btn { width: 24px; height: 24px; background: var(--indigo); border-radius: 50%; border: none; color: white; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; }
-  #new-room-form { padding: 8px; display: none; border-bottom: 1px solid var(--border); }
-  #new-room-input { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; color: var(--text); font-size: 12px; outline: none; }
-  #new-room-input:focus { border-color: var(--indigo); }
-  #rooms-list { flex: 1; overflow-y: auto; padding: 4px; }
-  .room-item { padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 12px; color: var(--muted); margin: 2px 0; display: flex; align-items: center; justify-content: space-between; }
-  .room-item:hover { background: var(--bg3); color: var(--text); }
-  .room-item.active { background: var(--bg3); color: var(--text); }
-  .room-item .room-del { opacity: 0; font-size: 10px; cursor: pointer; }
-  .room-item:hover .room-del { opacity: 1; }
-  #aichat-status { padding: 8px 12px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
-  #status-dot { width: 6px; height: 6px; border-radius: 50%; background: #f59e0b; }
-  #chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  #chat-header { padding: 10px 16px; background: var(--bg2); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
-  #chat-title { font-weight: 600; font-size: 14px; }
-  #mode-btns { display: flex; gap: 4px; background: var(--bg3); border-radius: 8px; padding: 3px; }
-  .mode-btn { padding: 4px 10px; border-radius: 6px; border: none; background: none; color: var(--muted); font-size: 11px; cursor: pointer; }
-  .mode-btn.active { background: var(--indigo); color: white; }
-  #chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-  #empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--muted); text-align: center; padding: 40px; }
-  #empty-state .big-icon { font-size: 64px; }
-  #empty-state h2 { color: var(--text); font-size: 22px; }
-  #empty-state p { font-size: 14px; line-height: 1.6; max-width: 360px; }
-  #create-room-big { padding: 12px 24px; background: var(--indigo); color: white; border: none; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; }
-  #create-room-big:hover { background: var(--indigo2); }
-  .msg-user { display: flex; justify-content: flex-end; }
-  .msg-user .bubble { background: var(--indigo); color: white; padding: 10px 14px; border-radius: 18px 18px 4px 18px; max-width: 70%; font-size: 14px; line-height: 1.5; }
-  .msg-ai { display: flex; gap: 10px; max-width: 80%; }
-  .msg-ai .avatar { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; margin-top: 2px; }
-  .msg-ai .msg-body { flex: 1; }
-  .msg-ai .speaker-name { font-size: 11px; font-weight: 600; margin-bottom: 4px; }
-  .msg-ai .bubble { background: var(--bg3); padding: 10px 14px; border-radius: 4px 18px 18px 18px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
-  .msg-system { text-align: center; font-size: 11px; color: var(--muted); font-style: italic; padding: 4px; }
-  .streaming .bubble { border: 1px solid var(--border); }
-  .cursor { display: inline-block; width: 2px; height: 14px; background: var(--indigo); animation: blink 1s infinite; vertical-align: middle; }
-  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
-  #chat-input-area { padding: 12px 16px; background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0; }
-  #input-row { display: flex; gap: 8px; align-items: flex-end; }
-  #msg-input { flex: 1; background: var(--bg3); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; color: var(--text); font-size: 14px; resize: none; outline: none; font-family: inherit; line-height: 1.4; max-height: 120px; }
-  #msg-input:focus { border-color: var(--indigo); }
-  #send-btn { padding: 10px 18px; background: var(--indigo); color: white; border: none; border-radius: 12px; font-size: 14px; font-weight: 600; cursor: pointer; flex-shrink: 0; }
-  #send-btn:hover { background: var(--indigo2); }
-  #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  #stop-btn { padding: 10px 18px; background: var(--red); color: white; border: none; border-radius: 12px; font-size: 14px; font-weight: 600; cursor: pointer; flex-shrink: 0; display: none; }
+const CSS = `
+:root{--bg:#030712;--bg2:#0f172a;--bg3:#1e293b;--bdr:#334155;--text:#f1f5f9;--muted:#64748b;--ind:#6366f1;--ind2:#4f46e5;--red:#ef4444;--grn:#10b981}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;height:100vh;overflow:hidden}
+#L{display:flex;height:100vh;overflow:hidden}
+#nav{width:56px;background:var(--bg2);border-right:1px solid var(--bdr);display:flex;flex-direction:column;align-items:center;padding:12px 0;gap:8px;flex-shrink:0}
+.nl{width:36px;height:36px;background:var(--ind);border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:14px;color:#fff;margin-bottom:8px}
+.nb{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer;border:none;background:none;color:var(--text);transition:background .15s}
+.nb:hover{background:var(--bg3)}.nb.act{background:var(--ind)}
+#C{flex:1;overflow:hidden;display:flex;flex-direction:column}
+.pg{display:none;flex:1;flex-direction:column;overflow:hidden}.pg.act{display:flex}
+#cw{display:flex;height:100%;overflow:hidden}
+#rp{width:200px;background:var(--bg2);border-right:1px solid var(--bdr);display:flex;flex-direction:column;flex-shrink:0}
+#rh{padding:12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--bdr)}
+#rh span{font-weight:600;font-size:13px}
+#arb{width:26px;height:26px;background:var(--ind);border-radius:50%;border:none;color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+#nrf{padding:8px;display:none;border-bottom:1px solid var(--bdr)}
+#nri{width:100%;background:var(--bg3);border:1px solid var(--bdr);border-radius:8px;padding:6px 8px;color:var(--text);font-size:12px;outline:none}
+#nri:focus{border-color:var(--ind)}
+#rl{flex:1;overflow-y:auto;padding:4px}
+.ri{padding:8px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--muted);margin:2px 0;display:flex;align-items:center;justify-content:space-between}
+.ri:hover,.ri.act{background:var(--bg3);color:var(--text)}
+.rd{opacity:0;font-size:10px;cursor:pointer;padding:2px 4px}.ri:hover .rd{opacity:1}
+#rf{padding:8px 12px;font-size:11px;color:var(--muted);border-top:1px solid var(--bdr);display:flex;align-items:center;gap:6px}
+#sd{width:6px;height:6px;border-radius:50%;background:#f59e0b;flex-shrink:0}
+#ca{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#es{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--muted);text-align:center;padding:40px}
+#es .ei{font-size:64px}#es h2{color:var(--text);font-size:22px}#es p{font-size:14px;line-height:1.6;max-width:360px}
+#cb{padding:12px 24px;background:var(--ind);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer}
+#cb:hover{background:var(--ind2)}
+#ch{padding:10px 16px;background:var(--bg2);border-bottom:1px solid var(--bdr);display:none;align-items:center;justify-content:space-between;flex-shrink:0}
+#ct{font-weight:600;font-size:14px}
+#mb{display:flex;gap:4px;background:var(--bg3);border-radius:8px;padding:3px}
+.mb{padding:4px 10px;border-radius:6px;border:none;background:none;color:var(--muted);font-size:11px;cursor:pointer}
+.mb.act{background:var(--ind);color:#fff}
+#ms{flex:1;overflow-y:auto;padding:16px;display:none;flex-direction:column;gap:12px}
+.mu{display:flex;justify-content:flex-end}
+.mu .b{background:var(--ind);color:#fff;padding:10px 14px;border-radius:18px 18px 4px 18px;max-width:70%;font-size:14px;line-height:1.5;word-break:break-word}
+.ma{display:flex;gap:10px;max-width:85%}
+.av{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;margin-top:2px}
+.ab{flex:1}.an{font-size:11px;font-weight:600;margin-bottom:4px}
+.at{background:var(--bg3);padding:10px 14px;border-radius:4px 18px 18px 18px;font-size:14px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.sy{text-align:center;font-size:11px;color:var(--muted);font-style:italic;padding:4px}
+.cur{display:inline-block;width:2px;height:14px;background:var(--ind);animation:blink 1s infinite;vertical-align:middle;margin-left:2px}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+#ia{padding:12px 16px;background:var(--bg2);border-top:1px solid var(--bdr);flex-shrink:0;display:none}
+#ir{display:flex;gap:8px;align-items:flex-end}
+#mi{flex:1;background:var(--bg3);border:1px solid var(--bdr);border-radius:12px;padding:10px 14px;color:var(--text);font-size:14px;resize:none;outline:none;font-family:inherit;line-height:1.4;max-height:120px}
+#mi:focus{border-color:var(--ind)}
+#sb,#xb{padding:10px 18px;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;flex-shrink:0}
+#sb{background:var(--ind)}#sb:hover{background:var(--ind2)}#sb:disabled{opacity:.4;cursor:not-allowed}
+#xb{background:var(--red);display:none}
+.sp{overflow-y:auto;padding:28px 32px;flex:1}
+.pt{font-size:20px;font-weight:700;margin-bottom:4px}.ps{color:var(--muted);font-size:13px;margin-bottom:24px}
+.ib{background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.3);border-radius:16px;padding:16px 20px;margin-bottom:20px;max-width:700px}
+.ib h3{font-size:13px;font-weight:600;color:#a5b4fc;margin-bottom:10px}
+.ibs{display:flex;gap:8px;flex-wrap:wrap}.ir2{font-size:12px;margin-top:8px}
+.pc{background:var(--bg2);border:1px solid var(--bdr);border-radius:16px;padding:20px;margin-bottom:14px;max-width:700px;transition:border-color .2s}
+.pc.ok{border-color:#1e4033}.pc.dim{opacity:.5}
+.ph{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.pt2{display:flex;align-items:center;gap:10px}
+.pi{font-size:22px}.pn{font-size:14px;font-weight:600}.psu{font-size:11px;color:var(--muted)}
+.pbg{font-size:11px;padding:3px 10px;border-radius:20px;border:1px solid transparent}
+.bn{background:rgba(100,116,139,.15);color:var(--muted);border-color:rgba(100,116,139,.2)}
+.bk{background:rgba(16,185,129,.15);color:var(--grn);border-color:rgba(16,185,129,.2)}
+.bl{background:rgba(99,102,241,.15);color:#a5b4fc;border-color:rgba(99,102,241,.2)}
+.pno{font-size:12px;color:var(--muted);background:rgba(255,255,255,.03);padding:8px 12px;border-radius:8px;margin-bottom:10px;line-height:1.5}
+.ps2{margin-top:10px}.pl{font-size:11px;color:var(--muted);display:block;margin-bottom:4px}
+.pr{display:flex;gap:8px;align-items:center}
+.pi2{flex:1;background:var(--bg3);border:1px solid var(--bdr);border-radius:10px;padding:7px 10px;color:var(--text);font-size:13px;outline:none}
+.pi2:focus{border-color:var(--ind)}.pi2:disabled{color:var(--muted)}
+.pse{width:100%;background:var(--bg3);border:1px solid var(--bdr);border-radius:10px;padding:7px 10px;color:var(--text);font-size:13px;outline:none}
+.pse:disabled{color:var(--muted)}
+.btn{padding:7px 14px;border:none;border-radius:10px;font-size:13px;cursor:pointer;font-weight:500;white-space:nowrap}
+.bp{background:var(--ind);color:#fff}.bp:hover{background:var(--ind2)}
+.bs{background:var(--bg3);border:1px solid var(--bdr);color:var(--text)}.bs:hover{background:var(--bdr)}
+.bd{background:none;border:none;color:var(--red);font-size:12px;cursor:pointer;padding:4px 8px}
+.bsm{padding:5px 10px;font-size:12px}
+.tr{font-size:12px;margin-top:6px}.tok{color:var(--grn)}.ter{color:var(--red)}
+`
 
-  /* Settings */
-  #settings-page { overflow-y: auto; padding: 32px; }
-  .settings-header { margin-bottom: 24px; }
-  .settings-header h1 { font-size: 20px; font-weight: 700; }
-  .settings-header p { color: var(--muted); font-size: 13px; margin-top: 4px; }
-  .provider-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; padding: 20px; margin-bottom: 16px; max-width: 640px; }
-  .provider-card.has-key { border-color: #1e4033; }
-  .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-  .card-title { display: flex; align-items: center; gap: 10px; }
-  .card-title .icon { font-size: 22px; }
-  .card-title h3 { font-size: 14px; font-weight: 600; }
-  .card-title small { color: var(--muted); font-size: 11px; }
-  .card-badge { font-size: 11px; padding: 3px 10px; border-radius: 20px; }
-  .badge-none { background: rgba(100,116,139,0.15); color: var(--muted); }
-  .badge-set { background: rgba(16,185,129,0.15); color: #10b981; }
-  .card-note { font-size: 12px; color: var(--muted); background: rgba(255,255,255,0.03); padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; line-height: 1.5; }
-  .card-inputs { display: flex; gap: 8px; }
-  .card-inputs input { flex: 1; background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; color: var(--text); font-size: 13px; outline: none; font-family: monospace; }
-  .card-inputs input:focus { border-color: var(--indigo); }
-  .card-btn { padding: 8px 16px; background: var(--indigo); color: white; border: none; border-radius: 10px; font-size: 13px; cursor: pointer; white-space: nowrap; }
-  .card-btn:hover { background: var(--indigo2); }
-  .card-btn.secondary { background: var(--bg3); border: 1px solid var(--border); color: var(--text); }
-  .card-btn.secondary:hover { background: var(--border); }
-  .card-actions { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
-  .card-test-result { font-size: 12px; margin-top: 6px; }
-  .result-ok { color: var(--green); }
-  .result-err { color: var(--red); }
-  .import-banner { background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.3); border-radius: 16px; padding: 16px 20px; margin-bottom: 20px; max-width: 640px; }
-  .import-banner h3 { font-size: 13px; font-weight: 600; color: #a5b4fc; margin-bottom: 10px; }
-  .import-btns { display: flex; gap: 8px; flex-wrap: wrap; }
-  .import-result { font-size: 12px; margin-top: 8px; }
-</style>
-
-<div id="layout">
+document.getElementById('app').innerHTML = `
+<style>${CSS}</style>
+<div id="L">
   <nav id="nav">
-    <div class="logo">R</div>
-    <a class="active" data-page="conf" title="Roundtable">🎙️</a>
-    <a data-page="mcp" title="MCP Servers">🔌</a>
-    <a data-page="settings" title="Providers">⚙️</a>
+    <div class="nl">R</div>
+    <button class="nb act" data-pg="conf" title="Roundtable">🎙️</button>
+    <button class="nb" data-pg="mcp" title="MCP">🔌</button>
+    <button class="nb" data-pg="settings" title="Providers">⚙️</button>
   </nav>
-  <div id="content">
-    <!-- Conference Page -->
-    <div class="page active" id="page-conf">
-      <div id="conf-inner">
-        <div id="rooms-panel">
-          <div id="rooms-header">
-            <span>🎙️ Rooms</span>
-            <button id="add-room-btn">+</button>
-          </div>
-          <div id="new-room-form">
-            <input id="new-room-input" placeholder="Room name..." />
-          </div>
-          <div id="rooms-list"></div>
-          <div id="aichat-status"><div id="status-dot"></div><span id="status-text">ready</span></div>
+  <div id="C">
+    <div class="pg act" id="pg-conf">
+      <div id="cw">
+        <div id="rp">
+          <div id="rh"><span>🎙️ Rooms</span><button id="arb">+</button></div>
+          <div id="nrf"><input id="nri" placeholder="Room name…"/></div>
+          <div id="rl"></div>
+          <div id="rf"><div id="sd"></div><span id="st">ready</span></div>
         </div>
-        <div id="chat-area">
-          <div id="empty-state">
-            <div class="big-icon">🎙️</div>
+        <div id="ca">
+          <div id="es">
+            <div class="ei">🎙️</div>
             <h2>Roundtable AI</h2>
-            <p>Create a conference room. ERIN moderates — Claude, Grok, and Gemini debate your question.</p>
-            <button id="create-room-big">+ Create Conference Room</button>
+            <p>Create a room. ERIN moderates — Claude, Grok, Gemini debate your question.</p>
+            <button id="cb">+ Create Conference Room</button>
           </div>
-          <div id="chat-header" style="display:none">
-            <span id="chat-title">Room</span>
-            <div id="mode-btns">
-              <button class="mode-btn active" data-mode="moderator">🤖 ERIN</button>
-              <button class="mode-btn" data-mode="parallel">⚡ Para</button>
-              <button class="mode-btn" data-mode="roundrobin">🔄 Robin</button>
+          <div id="ch"><span id="ct"></span>
+            <div id="mb">
+              <button class="mb act" data-mode="moderator">🤖 ERIN</button>
+              <button class="mb" data-mode="parallel">⚡ Para</button>
+              <button class="mb" data-mode="roundrobin">🔄 Robin</button>
             </div>
           </div>
-          <div id="chat-messages" style="display:none"></div>
-          <div id="chat-input-area" style="display:none">
-            <div id="input-row">
-              <textarea id="msg-input" rows="2" placeholder="Ask the roundtable anything... (Enter to send)"></textarea>
-              <button id="stop-btn">⏹ Stop</button>
-              <button id="send-btn">Send</button>
-            </div>
-          </div>
+          <div id="ms"></div>
+          <div id="ia"><div id="ir">
+            <textarea id="mi" rows="2" placeholder="Ask the roundtable… (Enter to send)"></textarea>
+            <button id="xb">⏹ Stop</button>
+            <button id="sb">Send</button>
+          </div></div>
         </div>
       </div>
     </div>
-
-    <!-- Settings Page -->
-    <div class="page" id="page-settings">
-      <div id="settings-page">
-        <div class="settings-header">
-          <h1>⚙️ Provider Settings</h1>
-          <p>Configure API keys. Stored in OS keyring — never in plaintext.</p>
+    <div class="pg" id="pg-mcp">
+      <div class="sp">
+        <div class="pt">🔌 MCP Connectors</div>
+        <div class="ps">Give ERIN and other AIs tools — file system, web search, databases, Docker.</div>
+        <div id="mcpl"></div>
+        <button class="btn bp" id="amb" style="margin-bottom:12px">+ Add Server</button>
+        <div id="amf" style="display:none" class="pc">
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <input class="pi2" id="mn" placeholder="Server name"/>
+            <select class="pse" id="mt"><option value="stdio">stdio (command)</option><option value="http">HTTP/SSE (url)</option></select>
+            <input class="pi2" id="mc" placeholder="npx -y @modelcontextprotocol/server-fetch" style="font-family:monospace"/>
+            <div style="display:flex;gap:8px">
+              <button class="btn bp bsm" id="ams">Add</button>
+              <button class="btn bs bsm" id="amc">Cancel</button>
+            </div>
+          </div>
         </div>
-        <div id="import-banner" class="import-banner" style="display:none">
+        <div class="pc" style="max-width:700px">
+          <div style="font-size:12px;color:var(--muted);font-weight:600;margin-bottom:8px">Quick-add presets:</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px" id="mpp"></div>
+        </div>
+      </div>
+    </div>
+    <div class="pg" id="pg-settings">
+      <div class="sp">
+        <div class="pt">⚙️ Provider Settings</div>
+        <div class="ps">Configure API keys. Stored in OS keyring — never in plaintext.</div>
+        <div class="ib" id="impb" style="display:none">
           <h3>⚡ Desktop apps detected — import sessions</h3>
-          <div class="import-btns" id="import-btns"></div>
-          <div class="import-result" id="import-result"></div>
+          <div class="ibs" id="imps"></div>
+          <div class="ir2" id="impr"></div>
         </div>
-        <div id="providers-list"></div>
-      </div>
-    </div>
-  <!-- MCP Page -->
-    <div class="page" id="page-mcp">
-      <div id="settings-page">
-        <div class="settings-header">
-          <h1>🔌 MCP Connectors</h1>
-          <p>Model Context Protocol servers — give ERIN tools like web search, file access, databases.</p>
-        </div>
-        <div id="mcp-list"></div>
-        <div style="margin-top:16px;max-width:640px">
-          <button class="card-btn" id="add-mcp-btn" style="margin-bottom:16px">+ Add Server</button>
-          <div id="add-mcp-form" style="display:none;background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:16px">
-            <div style="display:flex;flex-direction:column;gap:10px">
-              <input id="mcp-name" placeholder="Name (e.g. Filesystem)" style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:8px 12px;color:var(--text);font-size:13px;outline:none"/>
-              <select id="mcp-type" style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:8px 12px;color:var(--text);font-size:13px;outline:none">
-                <option value="stdio">stdio (command)</option>
-                <option value="http">HTTP/SSE (url)</option>
-              </select>
-              <input id="mcp-command" placeholder="Command (e.g. npx -y @modelcontextprotocol/server-fetch)" style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;font-family:monospace"/>
-              <div style="display:flex;gap:8px">
-                <button class="card-btn" id="mcp-save-btn">Add</button>
-                <button class="card-btn secondary" id="mcp-cancel-btn">Cancel</button>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div style="border:1px solid var(--border);border-radius:12px;padding:16px;max-width:640px;font-size:12px;color:var(--muted);line-height:1.7">
-          <strong style="color:var(--text)">Quick add presets:</strong><br/>
-          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px" id="mcp-presets"></div>
-        </div>
+        <div id="pvl"></div>
       </div>
     </div>
   </div>
-</div>
-`
+</div>`
 
-// ── Navigation ──
-document.querySelectorAll('#nav a').forEach(a => {
-  a.addEventListener('click', e => {
-    e.preventDefault()
-    const page = a.dataset.page
-    document.querySelectorAll('#nav a').forEach(x => x.classList.remove('active'))
-    document.querySelectorAll('.page').forEach(x => x.classList.remove('active'))
-    a.classList.add('active')
-    document.getElementById(`page-${page}`).classList.add('active')
-    if (page === 'settings') loadSettings()
-    if (page === 'mcp') loadMCP()
+// NAV
+document.querySelectorAll('.nb').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.nb').forEach(x=>x.classList.remove('act'))
+    document.querySelectorAll('.pg').forEach(x=>x.classList.remove('act'))
+    b.classList.add('act')
+    document.getElementById('pg-'+b.dataset.pg).classList.add('act')
+    if(b.dataset.pg==='settings') loadSettings()
+    if(b.dataset.pg==='mcp') loadMCP()
   })
 })
 
-// ── Model colors ──
-const MODEL_INFO = {
-  'claude-opus-4-5': { label: 'Claude', color: '#d97706', emoji: '🟠' },
-  'claude-sonnet-4-5': { label: 'Claude', color: '#d97706', emoji: '🟠' },
-  'claude-web': { label: 'Claude', color: '#d97706', emoji: '🟠' },
-  'grok-3': { label: 'Grok', color: '#6366f1', emoji: '🟣' },
-  'grok-web': { label: 'Grok', color: '#6366f1', emoji: '🟣' },
-  'gemini-2.5-pro': { label: 'Gemini', color: '#10b981', emoji: '🟢' },
-  'erin': { label: 'ERIN', color: '#ef4444', emoji: '🔴' },
-  'user': { label: 'You', color: '#6366f1', emoji: '👤' },
-  'System': { label: 'System', color: '#64748b', emoji: '⚙️' },
+// MODEL INFO
+const MI={
+  'claude-opus-4-5':{l:'Claude',c:'#d97706',e:'🟠'},'claude-sonnet-4-5':{l:'Claude',c:'#d97706',e:'🟠'},
+  'claude-web':{l:'Claude',c:'#d97706',e:'🟠'},'grok-3':{l:'Grok',c:'#6366f1',e:'🟣'},
+  'grok-web':{l:'Grok',c:'#6366f1',e:'🟣'},'gemini-2.5-pro':{l:'Gemini',c:'#10b981',e:'🟢'},
+  'gemini-2.0-flash':{l:'Gemini',c:'#10b981',e:'🟢'},'gpt-4o':{l:'GPT-4o',c:'#9ca3af',e:'⚫'},
+  'erin':{l:'ERIN',c:'#ef4444',e:'🔴'},
 }
-function modelInfo(speaker) {
-  if (!speaker) return { label: 'AI', color: '#64748b', emoji: '🤖' }
-  if (MODEL_INFO[speaker]) return MODEL_INFO[speaker]
-  const k = Object.keys(MODEL_INFO).find(k => speaker.includes(k) || k.includes(speaker))
-  return k ? MODEL_INFO[k] : { label: speaker, color: '#64748b', emoji: '🤖' }
+function mi(s){
+  if(!s) return {l:'AI',c:'#64748b',e:'🤖'}
+  if(MI[s]) return MI[s]
+  const k=Object.keys(MI).find(k=>s.includes(k.split('-')[0]))
+  return k?MI[k]:{l:s,c:'#64748b',e:'🤖'}
 }
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}
 
-// ── Rooms ──
-async function loadRooms() {
-  try {
-    rooms = await invoke('list_rooms')
-    renderRooms()
-  } catch(e) { console.error('loadRooms:', e) }
+// ROOMS
+async function loadRooms(){
+  try{rooms=await invoke('list_rooms')}catch(e){rooms=[]}
+  renderRooms()
 }
-
-function renderRooms() {
-  const list = document.getElementById('rooms-list')
-  list.innerHTML = ''
-  if (rooms.length === 0) {
-    list.innerHTML = '<div style="padding:16px;text-align:center;font-size:12px;color:var(--muted)">No rooms yet.<br/>Click + to create one.</div>'
-    return
-  }
-  rooms.forEach(r => {
-    const div = document.createElement('div')
-    div.className = 'room-item' + (activeRoom?.id === r.id ? ' active' : '')
-    div.innerHTML = `<span>${r.mode === 'moderator' ? '🤖' : r.mode === 'parallel' ? '⚡' : '🔄'} ${r.id}</span><span class="room-del" data-id="${r.id}">✕</span>`
-    div.addEventListener('click', () => switchRoom(r))
-    div.querySelector('.room-del').addEventListener('click', async e => {
+function renderRooms(){
+  const el=document.getElementById('rl'); if(!el) return
+  el.innerHTML=''
+  if(!rooms.length){el.innerHTML='<div style="padding:16px;text-align:center;font-size:12px;color:var(--muted)">No rooms yet.<br>Click + to create one.</div>';return}
+  rooms.forEach(r=>{
+    const d=document.createElement('div')
+    d.className='ri'+(activeRoom?.id===r.id?' act':'')
+    const icon=r.mode==='parallel'?'⚡':r.mode==='roundrobin'?'🔄':'🤖'
+    d.innerHTML=`<span>${icon} ${esc(r.id)}</span><span class="rd" data-id="${r.id}">✕</span>`
+    d.addEventListener('click',()=>switchRoom(r))
+    d.querySelector('.rd').addEventListener('click',async e=>{
       e.stopPropagation()
-      await invoke('delete_room', { roomId: r.id })
-      if (activeRoom?.id === r.id) { activeRoom = null; showEmpty() }
+      await invoke('delete_room',{roomId:r.id}).catch(()=>{})
+      if(activeRoom?.id===r.id){activeRoom=null;showEmpty()}
       loadRooms()
     })
-    list.appendChild(div)
+    el.appendChild(d)
   })
 }
-
-async function switchRoom(r) {
-  activeRoom = r
-  document.querySelectorAll('.room-item').forEach(x => x.classList.remove('active'))
-  document.querySelectorAll('.room-item').forEach(x => {
-    if (x.textContent.includes(r.id)) x.classList.add('active')
-  })
+async function switchRoom(r){
+  activeRoom=r; renderRooms()
   showChat()
-  document.getElementById('chat-title').textContent = r.id
-  // Set mode button
-  document.querySelectorAll('.mode-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.mode === r.mode)
-  })
-  // Load messages
-  try {
-    messages = await invoke('get_room_messages', { roomId: r.id })
-    renderMessages()
-  } catch(e) { messages = []; renderMessages() }
+  document.getElementById('ct').textContent=r.id
+  document.querySelectorAll('.mb').forEach(b=>b.classList.toggle('act',b.dataset.mode===r.mode))
+  try{messages=await invoke('get_room_messages',{roomId:r.id})}catch(e){messages=[]}
+  streamBuffers={}; renderMsgs()
+}
+function showEmpty(){
+  document.getElementById('es').style.display='flex'
+  document.getElementById('ch').style.display='none'
+  document.getElementById('ms').style.display='none'
+  document.getElementById('ia').style.display='none'
+}
+function showChat(){
+  document.getElementById('es').style.display='none'
+  document.getElementById('ch').style.display='flex'
+  document.getElementById('ms').style.display='flex'
+  document.getElementById('ia').style.display='block'
 }
 
-function showEmpty() {
-  document.getElementById('empty-state').style.display = 'flex'
-  document.getElementById('chat-header').style.display = 'none'
-  document.getElementById('chat-messages').style.display = 'none'
-  document.getElementById('chat-input-area').style.display = 'none'
-}
-
-function showChat() {
-  document.getElementById('empty-state').style.display = 'none'
-  document.getElementById('chat-header').style.display = 'flex'
-  document.getElementById('chat-messages').style.display = 'flex'
-  document.getElementById('chat-input-area').style.display = 'block'
-}
-
-// ── Add room ──
-const addBtn = document.getElementById('add-room-btn')
-const newForm = document.getElementById('new-room-form')
-const newInput = document.getElementById('new-room-input')
-
-addBtn.addEventListener('click', () => {
-  newForm.style.display = newForm.style.display === 'none' ? 'block' : 'none'
-  if (newForm.style.display === 'block') newInput.focus()
+// NEW ROOM
+document.getElementById('arb').addEventListener('click',()=>{
+  const f=document.getElementById('nrf')
+  f.style.display=f.style.display==='none'?'block':'none'
+  if(f.style.display==='block') document.getElementById('nri').focus()
+})
+document.getElementById('cb').addEventListener('click',()=>{
+  document.getElementById('nrf').style.display='block'
+  const i=document.getElementById('nri'); i.value='conference-1'; i.focus()
+})
+document.getElementById('nri').addEventListener('keydown',async e=>{
+  if(e.key==='Escape'){document.getElementById('nrf').style.display='none';return}
+  if(e.key!=='Enter') return
+  const name=e.target.value.trim(); if(!name) return
+  e.target.value=''; document.getElementById('nrf').style.display='none'
+  try{
+    const statuses=await invoke('get_auth_status').catch(()=>[])
+    const hk={}; statuses.forEach(s=>hk[s.provider_id]=s.has_key)
+    const parts=[]
+    const em=await gcfg('model-erin','erin'); parts.push(em)
+    const cloud=[
+      {id:'anthropic',fb:'claude-opus-4-5'},{id:'anthropic-web',fb:'claude-web'},
+      {id:'xai',fb:'grok-3'},{id:'xai-web',fb:'grok-web'},
+      {id:'google',fb:'gemini-2.5-pro'},{id:'openai',fb:'gpt-4o'},
+      {id:'github-copilot',fb:'github/gpt-4o'},{id:'mistral',fb:'mistral-large-latest'},
+    ]
+    for(const cp of cloud){
+      if(hk[cp.id]){const m=await gcfg('model-'+cp.id,cp.fb); if(!parts.includes(m)) parts.push(m)}
+    }
+    await invoke('create_room',{roomId:name,participants:parts,moderatorModel:em,mode:'moderator'})
+    await loadRooms()
+    const r=rooms.find(x=>x.id===name); if(r) switchRoom(r)
+  }catch(err){alert('Error: '+err)}
 })
 
-document.getElementById('create-room-big').addEventListener('click', () => {
-  newForm.style.display = 'block'
-  newInput.value = 'conference-1'
-  newInput.focus()
-})
-
-newInput.addEventListener('keydown', async e => {
-  if (e.key === 'Enter') {
-    const name = newInput.value.trim()
-    if (!name) return
-    newInput.value = ''
-    newForm.style.display = 'none'
-    try {
-      // Build participant list from selected models (skip providers with no key)
-      const statuses = await invoke('get_auth_status').catch(() => [])
-      const hasKey = {}
-      statuses.forEach(s => hasKey[s.provider_id] = s.has_key)
-
-      const participants = []
-      // ERIN always included (local, no key needed)
-      const erinModel = await invoke('get_config_value', { key: 'model-erin' }).catch(() => 'erin') || 'erin'
-      participants.push(erinModel)
-      // Cloud providers — only if key set
-      const cloudProviders = [
-        { id: 'anthropic', fallback: 'claude-opus-4-5' },
-        { id: 'anthropic-web', fallback: 'claude-web' },
-        { id: 'xai', fallback: 'grok-3' },
-        { id: 'xai-web', fallback: 'grok-web' },
-        { id: 'google', fallback: 'gemini-2.5-pro' },
-        { id: 'openai', fallback: 'gpt-4o' },
-        { id: 'github-copilot', fallback: 'github/gpt-4o' },
-        { id: 'mistral', fallback: 'mistral-large-latest' },
-      ]
-      for (const cp of cloudProviders) {
-        if (hasKey[cp.id]) {
-          const m = await invoke('get_config_value', { key: `model-${cp.id}` }).catch(() => null)
-          participants.push(m || cp.fallback)
-        }
-      }
-      // If only ERIN, add a note
-      if (participants.length === 1) {
-        alert('Only ERIN is available — go to ⚙️ Providers to add API keys for Claude, Grok, Gemini etc.')
-      }
-
-      await invoke('create_room', {
-        roomId: name,
-        participants,
-        moderatorModel: erinModel,
-        mode: 'moderator'
-      })
-      await loadRooms()
-      const r = rooms.find(x => x.id === name)
-      if (r) switchRoom(r)
-    } catch(e) { alert('Error: ' + e) }
-  }
-  if (e.key === 'Escape') { newForm.style.display = 'none' }
-})
-
-// ── Mode switch ──
-document.querySelectorAll('.mode-btn').forEach(b => {
-  b.addEventListener('click', async () => {
-    if (!activeRoom) return
-    const mode = b.dataset.mode
-    document.querySelectorAll('.mode-btn').forEach(x => x.classList.remove('active'))
-    b.classList.add('active')
-    activeRoom.mode = mode
-    await invoke('set_room_mode', { roomId: activeRoom.id, mode })
+// MODE BUTTONS
+document.querySelectorAll('.mb').forEach(b=>{
+  b.addEventListener('click',async()=>{
+    if(!activeRoom) return
+    document.querySelectorAll('.mb').forEach(x=>x.classList.remove('act'))
+    b.classList.add('act'); activeRoom.mode=b.dataset.mode
+    await invoke('set_room_mode',{roomId:activeRoom.id,mode:b.dataset.mode}).catch(()=>{})
   })
 })
 
-// ── Messages ──
-function renderMessages() {
-  const el = document.getElementById('chat-messages')
-  el.innerHTML = ''
-  messages.forEach(m => el.appendChild(renderMsg(m)))
-  // Streaming buffers
-  Object.entries(streamBuffers).forEach(([speaker, text]) => {
-    if (text) el.appendChild(renderStreaming(speaker, text))
-  })
-  if (isGenerating && Object.keys(streamBuffers).length === 0) {
-    const thinking = document.createElement('div')
-    thinking.className = 'msg-system'
-    thinking.textContent = 'ERIN moderating...'
-    el.appendChild(thinking)
+// MESSAGES
+function renderMsgs(){
+  const el=document.getElementById('ms'); if(!el) return
+  el.innerHTML=''
+  messages.forEach(m=>el.appendChild(buildMsg(m)))
+  Object.entries(streamBuffers).forEach(([s,t])=>{if(t) el.appendChild(buildStream(s,t))})
+  el.scrollTop=el.scrollHeight
+}
+function buildMsg(m){
+  if(m.role==='user'||m.speaker==='user'){
+    const d=document.createElement('div'); d.className='mu'
+    d.innerHTML=`<div class="b">${esc(m.content)}</div>`; return d
   }
-  el.scrollTop = el.scrollHeight
-}
-
-function renderMsg(m) {
-  if (m.speaker === 'user' || m.role === 'user') {
-    const div = document.createElement('div')
-    div.className = 'msg-user'
-    div.innerHTML = `<div class="bubble">${escHtml(m.content)}</div>`
-    return div
+  if(!m.speaker||m.speaker==='System'||m.content?.startsWith('📋')){
+    const d=document.createElement('div'); d.className='sy'
+    d.textContent=(m.content||'').replace(/^📋 \*|\*$/g,''); return d
   }
-  if (!m.speaker || m.speaker === 'System' || m.speaker?.includes('[System]') || m.speaker?.includes('[Moderator]')) {
-    const div = document.createElement('div')
-    div.className = 'msg-system'
-    div.textContent = m.content.replace(/^📋 \*|\*$/g, '')
-    return div
-  }
-  const info = modelInfo(m.speaker)
-  const div = document.createElement('div')
-  div.className = 'msg-ai'
-  div.innerHTML = `
-    <div class="avatar" style="background:${info.color}22;border:1px solid ${info.color}44">${info.emoji}</div>
-    <div class="msg-body">
-      <div class="speaker-name" style="color:${info.color}">${m.speaker}</div>
-      <div class="bubble">${escHtml(m.content)}</div>
-    </div>`
-  return div
+  const i=mi(m.speaker); const d=document.createElement('div'); d.className='ma'
+  d.innerHTML=`<div class="av" style="background:${i.c}22;border:1px solid ${i.c}44">${i.e}</div>
+    <div class="ab"><div class="an" style="color:${i.c}">${esc(m.speaker)}</div>
+    <div class="at">${esc(m.content)}</div></div>`; return d
+}
+function buildStream(spk,txt){
+  const i=mi(spk); const d=document.createElement('div'); d.className='ma'
+  d.innerHTML=`<div class="av" style="background:${i.c}22;border:1px solid ${i.c}44">${i.e}</div>
+    <div class="ab"><div class="an" style="color:${i.c}">${esc(spk)}</div>
+    <div class="at">${esc(txt)}<span class="cur"></span></div></div>`; return d
 }
 
-function renderStreaming(speaker, text) {
-  const info = modelInfo(speaker)
-  const div = document.createElement('div')
-  div.className = 'msg-ai streaming'
-  div.innerHTML = `
-    <div class="avatar" style="background:${info.color}22;border:1px solid ${info.color}44">${info.emoji}</div>
-    <div class="msg-body">
-      <div class="speaker-name" style="color:${info.color}">${speaker}</div>
-      <div class="bubble">${escHtml(text)}<span class="cursor"></span></div>
-    </div>`
-  return div
-}
-
-function escHtml(s) {
-  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')
-}
-
-// ── Send ──
-const msgInput = document.getElementById('msg-input')
-const sendBtn = document.getElementById('send-btn')
-const stopBtn = document.getElementById('stop-btn')
-
-msgInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+// SEND
+const miEl=document.getElementById('mi'), sbEl=document.getElementById('sb'), xbEl=document.getElementById('xb')
+miEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}})
+sbEl.addEventListener('click',send)
+xbEl.addEventListener('click',async()=>{
+  if(activeRoom) await invoke('cancel_generation',{roomId:activeRoom.id}).catch(()=>{})
+  setGen(false)
 })
-sendBtn.addEventListener('click', send)
-stopBtn.addEventListener('click', async () => {
-  if (activeRoom) await invoke('cancel_generation', { roomId: activeRoom.id }).catch(()=>{})
-  setGenerating(false)
-})
-
-async function send() {
-  const text = msgInput.value.trim()
-  if (!text || isGenerating || !activeRoom) return
-  msgInput.value = ''
-  setGenerating(true)
-  messages.push({ role: 'user', content: text, speaker: 'user', ts: Date.now() })
-  renderMessages()
-  try {
-    await invoke('send_message', { roomId: activeRoom.id, content: text })
-  } catch(e) {
-    messages.push({ role: 'assistant', content: '⚠️ Error: ' + e, speaker: 'System' })
-    setGenerating(false)
-    renderMessages()
-  }
+async function send(){
+  const t=miEl.value.trim(); if(!t||isGenerating||!activeRoom) return
+  miEl.value=''; setGen(true)
+  messages.push({role:'user',content:t,speaker:'user',ts:Date.now()}); renderMsgs()
+  try{await invoke('send_message',{roomId:activeRoom.id,content:t})}
+  catch(e){messages.push({role:'assistant',content:'⚠️ '+e,speaker:'System'});setGen(false);renderMsgs()}
+}
+function setGen(v){
+  isGenerating=v; sbEl.style.display=v?'none':'block'; xbEl.style.display=v?'block':'none'; miEl.disabled=v
 }
 
-function setGenerating(v) {
-  isGenerating = v
-  sendBtn.style.display = v ? 'none' : 'block'
-  stopBtn.style.display = v ? 'block' : 'none'
-  msgInput.disabled = v
-}
-
-// ── Events from Rust ──
-async function initEvents() {
-  await listen('stream-delta', e => {
-    const { room_id, speaker, delta } = e.payload
-    if (room_id !== activeRoom?.id) return
-    streamBuffers[speaker] = (streamBuffers[speaker] || '') + delta
-    renderMessages()
+// EVENTS
+async function initEvents(){
+  await listen('stream-delta',e=>{
+    const{room_id,speaker,delta}=e.payload; if(room_id!==activeRoom?.id) return
+    streamBuffers[speaker]=(streamBuffers[speaker]||'')+delta; renderMsgs()
   })
-  await listen('stream-end', e => {
-    const { room_id, speaker } = e.payload
-    if (room_id !== activeRoom?.id) return
-    delete streamBuffers[speaker]
-    renderMessages()
+  await listen('stream-end',e=>{
+    const{room_id,speaker}=e.payload; if(room_id!==activeRoom?.id) return
+    delete streamBuffers[speaker]; renderMsgs()
   })
-  await listen('turn-complete', async e => {
-    const { room_id } = e.payload
-    streamBuffers = {}
-    setGenerating(false)
-    if (room_id === activeRoom?.id) {
-      messages = await invoke('get_room_messages', { roomId: room_id }).catch(() => messages)
-      renderMessages()
+  await listen('turn-complete',async e=>{
+    const{room_id}=e.payload; streamBuffers={}; setGen(false)
+    if(room_id===activeRoom?.id){
+      try{messages=await invoke('get_room_messages',{roomId:room_id})}catch(err){}
+      renderMsgs()
     }
     loadRooms()
   })
-  await listen('turn-error', e => {
-    const { room_id, error } = e.payload
-    streamBuffers = {}
-    setGenerating(false)
-    if (room_id === activeRoom?.id) {
-      messages.push({ role: 'assistant', content: '⚠️ ' + error, speaker: 'System' })
-      renderMessages()
+  await listen('turn-error',e=>{
+    streamBuffers={}; setGen(false)
+    if(e.payload.room_id===activeRoom?.id){
+      messages.push({role:'assistant',content:'⚠️ '+e.payload.error,speaker:'System'}); renderMsgs()
     }
   })
 }
 
-// ── Settings ──
-const PROVIDERS = [
-  {
-    id: 'erin', label: 'ERIN', subtitle: 'Local AGI — Transformers', icon: '🔴',
-    noKey: true,
-    note: 'Your local AGI running Qwen2.5-Omni on Transformers at 10.1.1.19:5000. No API key needed.',
-    models: [
-      { id: 'erin', label: 'ERIN (default)' },
-      { id: 'erin-v1-12b-q4km', label: 'erin-v1-12b-q4km' },
-    ],
-    configKeys: [
-      { key: 'erin-endpoint', label: 'Endpoint', placeholder: 'http://10.1.1.19:5000', default: 'http://10.1.1.19:5000' }
-    ]
-  },
-  {
-    id: 'anthropic', label: 'Claude', subtitle: 'Anthropic API', icon: '🟠',
-    placeholder: 'sk-ant-api03-...',
-    note: 'API key from console.anthropic.com — separate from Claude Pro subscription.',
-    consoleUrl: 'https://console.anthropic.com/settings/keys',
-    models: [
-      { id: 'claude-opus-4-5', label: 'Claude Opus 4.5 (most capable)' },
-      { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (fast)' },
-      { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (cheapest)' },
-      { id: 'claude-opus-4-0', label: 'Claude Opus 4' },
-      { id: 'claude-sonnet-3-7', label: 'Claude Sonnet 3.7' },
-    ]
-  },
-  {
-    id: 'anthropic-web', label: 'Claude', subtitle: 'Desktop Session', icon: '🟠',
-    session: true,
-    note: 'Uses your Claude Desktop session — no API cost. Import from the banner above.',
-    models: [
-      { id: 'claude-web', label: 'Claude (web session)' },
-    ]
-  },
-  {
-    id: 'xai', label: 'Grok', subtitle: 'xAI API', icon: '🟣',
-    placeholder: 'xai-...',
-    note: 'API key from console.x.ai — separate from SuperGrok subscription.',
-    consoleUrl: 'https://console.x.ai/',
-    models: [
-      { id: 'grok-3', label: 'Grok 3 (most capable)' },
-      { id: 'grok-3-mini', label: 'Grok 3 Mini (fast)' },
-      { id: 'grok-2', label: 'Grok 2' },
-    ]
-  },
-  {
-    id: 'xai-web', label: 'Grok', subtitle: 'Desktop Session', icon: '🟣',
-    session: true,
-    note: 'Uses your Grok Desktop session — uses your SuperGrok subscription.',
-    models: [
-      { id: 'grok-web', label: 'Grok (web session)' },
-    ]
-  },
-  {
-    id: 'google', label: 'Gemini', subtitle: 'Google AI Studio', icon: '🟢',
-    placeholder: 'AIzaSy...',
-    note: 'Free API key from aistudio.google.com — rate limited but no cost.',
-    consoleUrl: 'https://aistudio.google.com/app/apikey',
-    models: [
-      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (best)' },
-      { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash (fast)' },
-      { id: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
-      { id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
-    ]
-  },
-  {
-    id: 'openai', label: 'OpenAI', subtitle: 'GPT / o-series', icon: '⚫',
-    placeholder: 'sk-proj-...',
-    note: 'API key from platform.openai.com — separate from ChatGPT Plus.',
-    consoleUrl: 'https://platform.openai.com/api-keys',
-    models: [
-      { id: 'gpt-4o', label: 'GPT-4o' },
-      { id: 'gpt-4o-mini', label: 'GPT-4o Mini (cheap)' },
-      { id: 'o3-mini', label: 'o3-mini (reasoning)' },
-      { id: 'o4-mini', label: 'o4-mini (reasoning)' },
-    ]
-  },
-  {
-    id: 'github-copilot', label: 'GitHub Copilot', subtitle: 'Subscription models', icon: '⚪',
-    placeholder: 'github_pat_...',
-    note: 'PAT with copilot scope. Gives access to GPT-4o, Claude, and more through your Copilot subscription.',
-    consoleUrl: 'https://github.com/settings/tokens/new?scopes=copilot',
-    models: [
-      { id: 'github/gpt-4o', label: 'GPT-4o via Copilot' },
-      { id: 'github/claude-3-5-sonnet', label: 'Claude 3.5 Sonnet via Copilot' },
-      { id: 'github/o3-mini', label: 'o3-mini via Copilot' },
-    ]
-  },
-  {
-    id: 'mistral', label: 'Mistral AI', subtitle: 'La Plateforme', icon: '🟡',
-    placeholder: 'mistral-...',
-    note: 'API key from console.mistral.ai.',
-    consoleUrl: 'https://console.mistral.ai/api-keys',
-    models: [
-      { id: 'mistral-large-latest', label: 'Mistral Large' },
-      { id: 'mistral-medium-latest', label: 'Mistral Medium' },
-      { id: 'mistral-small-latest', label: 'Mistral Small (cheap)' },
-      { id: 'codestral-latest', label: 'Codestral (code)' },
-    ]
-  },
-  {
-    id: 'ollama', label: 'Ollama', subtitle: 'Local — configurable', icon: '🔵',
-    noKey: true,
-    note: 'Local Ollama instance. Set endpoint and model below.',
-    models: [],
-    configKeys: [
-      { key: 'ollama-endpoint', label: 'Endpoint', placeholder: 'http://localhost:11434', default: 'http://localhost:11434' },
-      { key: 'ollama-model', label: 'Model', placeholder: 'llama3.2', default: 'llama3.2' },
-    ]
-  },
-]
-
-// Track which model is selected per provider
-let selectedModels = {}
-let configValues = {}
-
-async function getConfig(key, def = '') {
-  try {
-    const v = await invoke('get_config_value', { key })
-    return (v && v !== 'null') ? v : def
-  } catch(e) { return def }
+// CONFIG HELPERS
+async function gcfg(key,def=''){
+  try{const v=await invoke('get_config_value',{key});return(v&&v!=='null'&&v!=='')?v:def}catch(e){return def}
 }
+async function scfg(key,val){try{await invoke('save_config_value',{key,value:val})}catch(e){}}
 
-async function loadProviderConfigs() {
-  for (const p of PROVIDERS) {
-    const def = p.models?.length > 0 ? p.models[0].id : ''
-    selectedModels[p.id] = await getConfig(`model-${p.id}`, def)
-    if (p.configKeys) {
-      for (const ck of p.configKeys) {
-        configValues[ck.key] = await getConfig(ck.key, ck.default || '')
-      }
-    }
+// SETTINGS
+async function loadProviderConfigs(){
+  for(const p of PROVIDERS){
+    const def=p.models?.length?p.models[0].id:''
+    selectedModels[p.id]=await gcfg('model-'+p.id,def)
+    if(p.configKeys) for(const ck of p.configKeys) configValues[ck.key]=await gcfg(ck.key,ck.def||'')
   }
 }
 
-function renderProviders() {
-  const list = document.getElementById('providers-list')
-  if (!list) { console.error('providers-list not found'); return }
-  list.innerHTML = ''
-  PROVIDERS.forEach(p => {
-    try {
-    const s = providerStatuses[p.id]
-    const hasKey = p.noKey || s?.has_key
-    const card = document.createElement('div')
-    card.className = 'provider-card'
-    // Dim card if no key and not a no-key provider
-    if (!hasKey) card.style.opacity = '0.55'
-    if (hasKey && !p.noKey) card.style.borderColor = '#1e4033'
-
-    // Model selector HTML
-    let modelHtml = ''
-    if (p.models && p.models.length > 0) {
-      const opts = p.models.map(m =>
-        `<option value="${m.id}" ${selectedModels[p.id] === m.id ? 'selected' : ''}>${m.label}</option>`
-      ).join('')
-      modelHtml = `
-        <div style="margin-top:10px">
-          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Active model</label>
-          <select class="model-select" data-provider="${p.id}"
-            style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:7px 10px;color:${hasKey ? 'var(--text)' : 'var(--muted)'};font-size:13px;outline:none"
-            ${!hasKey ? 'disabled' : ''}>
-            ${opts}
-          </select>
-        </div>`
+async function loadSettings(){
+  await loadProviderConfigs()
+  try{
+    const list=await invoke('get_auth_status')
+    providerStatuses={}; list.forEach(s=>{providerStatuses[s.provider_id]=s})
+  }catch(e){console.error('get_auth_status:',e)}
+  try{
+    const apps=await invoke('check_installed_apps')
+    const banner=document.getElementById('impb'), btns=document.getElementById('imps')
+    if((apps.claude_desktop||apps.grok_desktop)&&banner&&btns){
+      banner.style.display='block'; btns.innerHTML=''
+      if(apps.claude_desktop){
+        const b=document.createElement('button'); b.className='btn bsm'
+        b.style.background='#92400e'; b.style.color='#fff'
+        b.textContent=(apps.claude_logged_in?'Re-import':'Import')+' 🟠 Claude Session'
+        b.onclick=async()=>{
+          const r=await invoke('import_claude_session')
+          const el=document.getElementById('impr')
+          if(el){el.textContent=r.message;el.style.color=r.success?'#10b981':'#ef4444'}
+          loadSettings()
+        }; btns.appendChild(b)
+      }
+      if(apps.grok_desktop){
+        const b=document.createElement('button'); b.className='btn bsm'
+        b.style.background='#3730a3'; b.style.color='#fff'
+        b.textContent=(apps.grok_logged_in?'Re-import':'Import')+' 🟣 Grok Session'
+        b.onclick=async()=>{
+          const r=await invoke('import_grok_session')
+          const el=document.getElementById('impr')
+          if(el){el.textContent=r.message;el.style.color=r.success?'#10b981':'#ef4444'}
+          loadSettings()
+        }; btns.appendChild(b)
+      }
     }
+  }catch(e){}
+  renderProviders()
+}
 
-    // Config keys HTML
-    let configHtml = ''
-    if (p.configKeys) {
-      configHtml = p.configKeys.map(ck => `
-        <div style="margin-top:10px">
-          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">${ck.label}</label>
-          <div style="display:flex;gap:8px">
-            <input class="config-input" data-key="${ck.key}" value="${configValues[ck.key] || ck.default || ''}"
-              placeholder="${ck.placeholder}"
-              style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:7px 10px;color:var(--text);font-size:13px;outline:none;font-family:monospace"/>
-            <button class="card-btn config-save-btn" data-key="${ck.key}" style="font-size:12px;padding:6px 12px">Set</button>
-          </div>
-        </div>`).join('')
+function renderProviders(){
+  const list=document.getElementById('pvl'); if(!list) return
+  list.innerHTML=''
+  for(const p of PROVIDERS){
+    const s=providerStatuses[p.id]
+    const hasKey=!!(p.noKey||s?.has_key)
+    const card=document.createElement('div')
+    card.className='pc'+(hasKey&&!p.noKey?' ok':'')+((!hasKey&&!p.noKey)?' dim':'')
+    let badge=`<span class="pbg bn">No key</span>`
+    if(p.noKey) badge=`<span class="pbg bl">Local</span>`
+    else if(s?.has_key) badge=`<span class="pbg bk">✓ Set</span>`
+    let modelHtml=''
+    if(p.models&&p.models.length){
+      const opts=p.models.map(m=>`<option value="${m.id}"${selectedModels[p.id]===m.id?' selected':''}>${m.label}</option>`).join('')
+      modelHtml=`<div class="ps2"><span class="pl">Active model</span>
+        <select class="pse msel" data-pid="${p.id}"${!hasKey?' disabled':''}>${opts}</select></div>`
     }
-
-    // Key input / session HTML
-    let authHtml = ''
-    if (!p.noKey && !p.session) {
-      authHtml = `
-        <div style="margin-top:12px">
-          <div class="card-inputs">
-            ${p.consoleUrl ? `<button class="card-btn secondary" onclick="window.__openConsole('${p.id}')" style="font-size:12px;padding:7px 12px">🔑 Get Key</button>` : ''}
-            <input type="password" id="input-${p.id}"
-              placeholder="${s?.has_key ? '••••• (set — paste to update)' : (p.placeholder || 'API key')}"
-              style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:7px 10px;color:var(--text);font-size:13px;outline:none;font-family:monospace"/>
-            <button class="card-btn" id="save-${p.id}" style="font-size:12px;padding:7px 14px">Save</button>
-          </div>
-          ${s?.has_key ? `
-          <div class="card-actions" style="margin-top:8px">
-            <button class="card-btn secondary" id="test-${p.id}" style="font-size:12px">🔌 Test</button>
-            <button class="card-btn secondary" id="del-${p.id}" style="font-size:12px;color:#ef4444">🗑 Remove</button>
-          </div>` : ''}
-          <div class="card-test-result" id="result-${p.id}"></div>
+    let cfgHtml=''
+    if(p.configKeys) cfgHtml=p.configKeys.map(ck=>`
+      <div class="ps2"><span class="pl">${ck.label}</span>
+        <div class="pr"><input class="pi2 cfgi" data-key="${ck.key}" value="${esc(configValues[ck.key]||ck.def||'')}" placeholder="${ck.placeholder}" style="font-family:monospace"/>
+        <button class="btn bs bsm cfgs" data-key="${ck.key}">Set</button></div></div>`).join('')
+    let authHtml=''
+    if(!p.noKey&&!p.session){
+      authHtml=`<div class="ps2"><span class="pl">API Key</span>
+        <div class="pr">${p.consoleUrl?`<button class="btn bs bsm" onclick="window.__con('${p.id}')">🔑 Get Key</button>`:''}
+          <input type="password" class="pi2 ki" id="ki-${p.id}" placeholder="${s?.has_key?'••••• (update)':(p.placeholder||'API key')}" style="font-family:monospace"/>
+          <button class="btn bp bsm ks" data-pid="${p.id}">Save</button></div>
+        ${s?.has_key?`<div class="pr" style="margin-top:8px;gap:8px">
+          <button class="btn bs bsm kt" data-pid="${p.id}">🔌 Test</button>
+          <button class="bd kd" data-pid="${p.id}">🗑 Remove</button></div>
+          <div class="tr" id="tr-${p.id}"></div>`:''}
         </div>`
-    } else if (p.session) {
-      authHtml = s?.has_key
-        ? `<div style="margin-top:8px;display:flex;align-items:center;gap:12px">
-             <span style="font-size:12px;color:var(--green)">✅ Session active</span>
-             <button class="card-btn secondary" id="del-${p.id}" style="font-size:12px;color:#ef4444">Clear</button>
-             <button class="card-btn secondary" id="test-${p.id}" style="font-size:12px">🔌 Test</button>
-           </div>
-           <div class="card-test-result" id="result-${p.id}"></div>`
-        : `<div style="margin-top:8px;font-size:12px;color:var(--muted)">Use the import button at the top of this page</div>`
-    } else if (p.noKey) {
-      authHtml = `
-        <div style="margin-top:8px">
-          <button class="card-btn secondary" id="test-${p.id}" style="font-size:12px">🔌 Test Connection</button>
-          <div class="card-test-result" id="result-${p.id}"></div>
-        </div>`
+    }else if(p.session){
+      authHtml=s?.has_key
+        ?`<div class="ps2" style="display:flex;align-items:center;gap:12px">
+            <span style="font-size:12px;color:var(--grn)">✅ Session active</span>
+            <button class="btn bs bsm kt" data-pid="${p.id}">🔌 Test</button>
+            <button class="bd kd" data-pid="${p.id}">🗑 Clear</button></div>
+          <div class="tr" id="tr-${p.id}"></div>`
+        :`<div style="font-size:12px;color:var(--muted);margin-top:8px">Use import button above ↑</div>`
+    }else{
+      authHtml=`<div class="ps2">
+        <button class="btn bs bsm kt" data-pid="${p.id}">🔌 Test Connection</button>
+        <div class="tr" id="tr-${p.id}"></div></div>`
     }
-
-    card.innerHTML = `
-      <div class="card-header">
-        <div class="card-title">
-          <span class="icon">${p.icon}</span>
-          <div>
-            <h3>${p.label}</h3>
-            <small style="color:var(--muted)">${p.subtitle}</small>
-          </div>
-        </div>
-        <span class="card-badge ${hasKey ? 'badge-set' : 'badge-none'}">${hasKey ? (p.noKey ? 'Local' : '✓ Set') : 'No key'}</span>
-      </div>
-      <div class="card-note">${p.note}</div>
-      ${modelHtml}
-      ${configHtml}
-      ${authHtml}`
-
+    card.innerHTML=`
+      <div class="ph"><div class="pt2"><span class="pi">${p.icon}</span>
+        <div><div class="pn">${p.label}</div><div class="psu">${p.subtitle}</div></div></div>${badge}</div>
+      <div class="pno">${p.note}</div>${modelHtml}${cfgHtml}${authHtml}`
     list.appendChild(card)
-    } catch(cardErr) { console.error('Error rendering provider', p.id, cardErr) }
-
-    // Model select handler
-    const sel = card.querySelector('.model-select')
-    if (sel) {
-      sel.addEventListener('change', async () => {
-        selectedModels[p.id] = sel.value
-        await invoke('save_config_value', { key: `model-${p.id}`, value: sel.value })
-      })
-    }
-
-    // Config save buttons
-    card.querySelectorAll('.config-save-btn').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const key = btn.dataset.key
-        const inp = card.querySelector(`.config-input[data-key="${key}"]`)
-        if (!inp) return
-        configValues[key] = inp.value.trim()
-        await invoke('save_config_value', { key, value: inp.value.trim() })
-        btn.textContent = '✓'
-        setTimeout(() => btn.textContent = 'Set', 1500)
-      })
-    })
-
-    // Save key
-    const saveBtn = document.getElementById(`save-${p.id}`)
-    if (saveBtn) {
-      saveBtn.addEventListener('click', async () => {
-        const inp = document.getElementById(`input-${p.id}`)
-        const key = inp?.value.trim()
-        if (!key) return
-        try {
-          await invoke('save_api_key', { providerId: p.id, apiKey: key })
-          await loadSettings()
-        } catch(e) { alert('Error: ' + e) }
-      })
-    }
-
-    // Test
-    const testBtn = document.getElementById(`test-${p.id}`)
-    if (testBtn) {
-      testBtn.addEventListener('click', async () => {
-        const el = document.getElementById(`result-${p.id}`)
-        if (el) { el.textContent = 'Testing...'; el.className = 'card-test-result' }
-        try {
-          const msg = await invoke('test_connection', { providerId: p.id })
-          if (el) { el.textContent = msg; el.className = 'card-test-result result-ok' }
-        } catch(e) {
-          if (el) { el.textContent = String(e); el.className = 'card-test-result result-err' }
-        }
-      })
-    }
-
-    // Delete
-    const delBtn = document.getElementById(`del-${p.id}`)
-    if (delBtn) {
-      delBtn.addEventListener('click', async () => {
-        await invoke('delete_api_key', { providerId: p.id })
-        await loadSettings()
-      })
-    }
-  })
+    card.querySelectorAll('.msel').forEach(sel=>sel.addEventListener('change',async()=>{
+      selectedModels[sel.dataset.pid]=sel.value; await scfg('model-'+sel.dataset.pid,sel.value)
+    }))
+    card.querySelectorAll('.cfgs').forEach(btn=>btn.addEventListener('click',async()=>{
+      const key=btn.dataset.key, val=card.querySelector(`.cfgi[data-key="${key}"]`)?.value.trim()
+      if(val===undefined) return; configValues[key]=val; await scfg(key,val)
+      btn.textContent='✓'; setTimeout(()=>btn.textContent='Set',1500)
+    }))
+    card.querySelectorAll('.ks').forEach(btn=>btn.addEventListener('click',async()=>{
+      const pid=btn.dataset.pid, val=document.getElementById('ki-'+pid)?.value.trim()
+      if(!val) return
+      try{await invoke('save_api_key',{providerId:pid,apiKey:val});await loadSettings()}
+      catch(e){alert('Error: '+e)}
+    }))
+    card.querySelectorAll('.kt').forEach(btn=>btn.addEventListener('click',async()=>{
+      const pid=btn.dataset.pid, el=document.getElementById('tr-'+pid)
+      if(el){el.textContent='Testing…';el.className='tr'}
+      try{const msg=await invoke('test_connection',{providerId:pid});if(el){el.textContent=msg;el.className='tr tok'}}
+      catch(e){if(el){el.textContent=String(e);el.className='tr ter'}}
+    }))
+    card.querySelectorAll('.kd').forEach(btn=>btn.addEventListener('click',async()=>{
+      await invoke('delete_api_key',{providerId:btn.dataset.pid}).catch(()=>{});await loadSettings()
+    }))
+  }
 }
+window.__con=async pid=>{try{await invoke('open_console',{providerId:pid})}catch(e){}}
 
-
-async function loadSettings() {
-  try { await loadProviderConfigs() } catch(e) { console.error('loadProviderConfigs:', e) }
-  try {
-    const list = await invoke('get_auth_status')
-    providerStatuses = {}
-    list.forEach(s => { providerStatuses[s.provider_id] = s })
-  } catch(e) { console.error('get_auth_status:', e) }
-
-  try {
-    const apps = await invoke('check_installed_apps')
-    const banner = document.getElementById('import-banner')
-    const btns = document.getElementById('import-btns')
-    if (banner && btns && (apps.claude_desktop || apps.grok_desktop)) {
-      banner.style.display = 'block'
-      btns.innerHTML = ''
-      if (apps.claude_desktop) {
-        const b = document.createElement('button')
-        b.className = 'card-btn'; b.style.background = '#92400e'
-        b.textContent = (apps.claude_logged_in ? 'Re-import' : 'Import') + ' 🟠 Claude Session'
-        b.onclick = async () => {
-          const r = await invoke('import_claude_session')
-          const el = document.getElementById('import-result')
-          if (el) { el.textContent = r.message; el.style.color = r.success ? '#10b981' : '#ef4444' }
-          loadSettings()
-        }
-        btns.appendChild(b)
-      }
-      if (apps.grok_desktop) {
-        const b = document.createElement('button')
-        b.className = 'card-btn'; b.style.background = '#3730a3'
-        b.textContent = (apps.grok_logged_in ? 'Re-import' : 'Import') + ' 🟣 Grok Session'
-        b.onclick = async () => {
-          const r = await invoke('import_grok_session')
-          const el = document.getElementById('import-result')
-          if (el) { el.textContent = r.message; el.style.color = r.success ? '#10b981' : '#ef4444' }
-          loadSettings()
-        }
-        btns.appendChild(b)
-      }
-    }
-  } catch(e) { /* no desktop apps detected */ }
-
-  try { renderProviders() } catch(e) { console.error('renderProviders:', e) }
-}
-
-window.__openConsole = async (pid) => {
-  try { await invoke('open_console', { providerId: pid }) }
-  catch(e) { console.error(e) }
-}
-
-// ── MCP ──
-const MCP_PRESETS = [
-  { name: 'Fetch/Web', command: 'npx -y @modelcontextprotocol/server-fetch' },
-  { name: 'Filesystem', command: 'npx -y @modelcontextprotocol/server-filesystem /' },
-  { name: 'Git', command: 'npx -y @modelcontextprotocol/server-git' },
-  { name: 'Postgres', command: 'npx -y @modelcontextprotocol/server-postgres postgresql://localhost/mydb' },
-  { name: 'ERIN Memory', command: 'http://10.1.1.19:5456', type: 'http' },
+// MCP
+const MCPP=[
+  {name:'Fetch/Web',cmd:'npx -y @modelcontextprotocol/server-fetch'},
+  {name:'Filesystem',cmd:'npx -y @modelcontextprotocol/server-filesystem /'},
+  {name:'Git',cmd:'npx -y @modelcontextprotocol/server-git'},
+  {name:'Postgres',cmd:'npx -y @modelcontextprotocol/server-postgres postgresql://localhost/mydb'},
+  {name:'ERIN Memory',cmd:'http://10.1.1.19:5456',type:'http'},
 ]
-
-async function loadMCP() {
-  let servers = []
-  try {
-    const raw = await invoke('get_config_value', { key: 'mcp-servers' })
-    if (raw) servers = JSON.parse(raw)
-  } catch(e) {}
-
-  // Always show local-system as first entry
-  const list = document.getElementById('mcp-list')
-  list.innerHTML = ''
-  const builtIn = {
-    id: 'local-system', name: 'Local System (built-in)', type: 'stdio',
-    command: 'node /opt/mcp-local-server/dist/index.js',
-    enabled: true, builtin: true,
-    desc: 'File system, processes, Docker, cron — already connected'
-  }
-  ;[builtIn, ...servers].forEach(s => {
-    const div = document.createElement('div')
-    div.className = 'provider-card' + (s.enabled ? ' has-key' : '')
-    div.innerHTML = `
-      <div class="card-header">
-        <div class="card-title">
-          <span class="icon">${s.type === 'http' ? '🌐' : '⚡'}</span>
-          <div><h3>${s.name}</h3><small>${s.desc || s.command || ''}</small></div>
-        </div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <span class="card-badge ${s.enabled ? 'badge-set' : 'badge-none'}">${s.type.toUpperCase()}</span>
-          ${!s.builtin ? `<button onclick="deleteMCP('${s.id}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px">✕</button>` : ''}
-        </div>
-      </div>`
-    list.appendChild(div)
+async function loadMCP(){
+  let servers=[]
+  try{const r=await invoke('get_config_value',{key:'mcp-servers'});if(r&&r!=='null') servers=JSON.parse(r)}catch(e){}
+  const el=document.getElementById('mcpl'); if(!el) return; el.innerHTML=''
+  const all=[{id:'local-system',name:'Local System (built-in)',type:'stdio',cmd:'node /opt/mcp-local-server/dist/index.js',enabled:true,builtin:true,desc:'File system, processes, Docker, cron'},...servers]
+  all.forEach(s=>{
+    const d=document.createElement('div'); d.className='pc ok'; d.style.maxWidth='700px'
+    d.innerHTML=`<div class="ph"><div class="pt2"><span class="pi">${s.type==='http'?'🌐':'⚡'}</span>
+      <div><div class="pn">${esc(s.name)}</div><div class="psu" style="font-family:monospace">${esc(s.desc||s.cmd||'')}</div></div></div>
+      <div style="display:flex;align-items:center;gap:8px"><span class="pbg bk">${s.type.toUpperCase()}</span>
+      ${!s.builtin?`<button class="bd" data-mid="${s.id}">✕</button>`:''}</div></div>`
+    el.appendChild(d)
+    d.querySelectorAll('[data-mid]').forEach(b=>b.addEventListener('click',async()=>{
+      servers=servers.filter(x=>x.id!==b.dataset.mid); await scfg('mcp-servers',JSON.stringify(servers)); loadMCP()
+    }))
   })
-
-  // Presets
-  const presets = document.getElementById('mcp-presets')
-  if (presets && presets.children.length === 0) {
-    MCP_PRESETS.forEach(p => {
-      const b = document.createElement('button')
-      b.className = 'card-btn secondary'
-      b.style.fontSize = '12px'
-      b.textContent = '+ ' + p.name
-      b.onclick = () => addMCPPreset(p, servers)
-      presets.appendChild(b)
-    })
-  }
+  const pp=document.getElementById('mpp')
+  if(pp&&!pp.children.length) MCPP.forEach(p=>{
+    const b=document.createElement('button'); b.className='btn bs bsm'; b.textContent='+ '+p.name
+    b.onclick=async()=>{servers.push({id:'mcp-'+Date.now(),name:p.name,type:p.type||'stdio',cmd:p.cmd,enabled:true});await scfg('mcp-servers',JSON.stringify(servers));loadMCP()}
+    pp.appendChild(b)
+  })
 }
-
-window.deleteMCP = async function(id) {
-  const raw = await invoke('get_config_value', { key: 'mcp-servers' }).catch(() => null)
-  const servers = raw ? JSON.parse(raw).filter(s => s.id !== id) : []
-  await invoke('save_config_value', { key: 'mcp-servers', value: JSON.stringify(servers) })
-  loadMCP()
-}
-
-async function addMCPPreset(p, existing) {
-  const servers = [...existing, {
-    id: 'mcp-' + Date.now(), name: p.name,
-    type: p.type || 'stdio', command: p.command, enabled: true
-  }]
-  await invoke('save_config_value', { key: 'mcp-servers', value: JSON.stringify(servers) })
-  loadMCP()
-}
-
-document.getElementById('add-mcp-btn').addEventListener('click', () => {
-  document.getElementById('add-mcp-form').style.display = 'block'
-})
-document.getElementById('mcp-cancel-btn').addEventListener('click', () => {
-  document.getElementById('add-mcp-form').style.display = 'none'
-})
-document.getElementById('mcp-save-btn').addEventListener('click', async () => {
-  const name = document.getElementById('mcp-name').value.trim()
-  const type = document.getElementById('mcp-type').value
-  const command = document.getElementById('mcp-command').value.trim()
-  if (!name || !command) return
-  const raw = await invoke('get_config_value', { key: 'mcp-servers' }).catch(() => null)
-  const servers = raw ? JSON.parse(raw) : []
-  servers.push({ id: 'mcp-' + Date.now(), name, type, command, enabled: true })
-  await invoke('save_config_value', { key: 'mcp-servers', value: JSON.stringify(servers) })
-  document.getElementById('add-mcp-form').style.display = 'none'
-  document.getElementById('mcp-name').value = ''
-  document.getElementById('mcp-command').value = ''
-  loadMCP()
+document.getElementById('amb').addEventListener('click',()=>document.getElementById('amf').style.display='block')
+document.getElementById('amc').addEventListener('click',()=>document.getElementById('amf').style.display='none')
+document.getElementById('ams').addEventListener('click',async()=>{
+  const name=document.getElementById('mn').value.trim(), type=document.getElementById('mt').value, cmd=document.getElementById('mc').value.trim()
+  if(!name||!cmd) return
+  const r=await gcfg('mcp-servers','[]'); const servers=JSON.parse(r)
+  servers.push({id:'mcp-'+Date.now(),name,type,cmd,enabled:true}); await scfg('mcp-servers',JSON.stringify(servers))
+  document.getElementById('amf').style.display='none'; document.getElementById('mn').value=''; document.getElementById('mc').value=''; loadMCP()
 })
 
-// ── Init ──
-async function init() {
-  await initEvents()
-  await loadRooms()
-  if (rooms.length > 0) switchRoom(rooms[0])
-}
-
+// INIT
+async function init(){await initEvents();await loadRooms();if(rooms.length>0) switchRoom(rooms[0])}
 init()
