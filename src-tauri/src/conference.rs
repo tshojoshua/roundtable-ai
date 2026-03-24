@@ -372,6 +372,46 @@ fn to_chat_msgs(messages: &[Message]) -> Vec<connector::ChatMessage> {
     }).collect()
 }
 
+/// Build messages with a model-specific system prompt prepended
+fn with_system_prompt(model_id: &str, messages: &[Message]) -> Vec<connector::ChatMessage> {
+    let system = match model_id {
+        m if m.starts_with("claude") || m == "claude-web" => {
+            "You are Claude, an AI assistant made by Anthropic, participating in a Roundtable AI conference. Other AI models are also present. Engage thoughtfully with the topic, building on or respectfully challenging other perspectives. Be direct and substantive. Do not introduce yourself unless asked."
+        }
+        m if m.starts_with("grok") || m == "grok-web" => {
+            "You are Grok, an AI made by xAI, participating in a Roundtable AI conference. Other AI models are present. Be direct, intellectually honest, and willing to challenge assumptions. Engage with the topic — don't just summarize, add your own perspective."
+        }
+        m if m.starts_with("gemini") => {
+            "You are Gemini, an AI made by Google DeepMind, participating in a Roundtable AI conference. Bring analytical depth and breadth of knowledge. Engage with other perspectives in the conversation. Be concise and substantive."
+        }
+        m if m.starts_with("gpt") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("github/gpt") => {
+            "You are GPT-4o, an AI made by OpenAI, participating in a Roundtable AI conference. Engage analytically with the topic. Be helpful, direct, and add genuine insight. Other AI models are present — engage with their perspectives where relevant."
+        }
+        m if m.starts_with("mistral") => {
+            "You are Mistral, an AI participating in a Roundtable AI conference. Be precise, efficient, and direct. Add your perspective to the discussion."
+        }
+        m if m.starts_with("github/claude") => {
+            "You are Claude (via GitHub Copilot), participating in a Roundtable AI conference. Engage thoughtfully and be direct and substantive."
+        }
+        _ => "" // ERIN and Ollama: no injection, they have their own system prompts
+    };
+
+    let mut result = Vec::new();
+    if !system.is_empty() {
+        result.push(connector::ChatMessage {
+            role: "system".to_string(),
+            content: system.to_string(),
+        });
+    }
+    for m in messages {
+        result.push(connector::ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        });
+    }
+    result
+}
+
 // ─────────────────────────────────────────
 // PERSISTENCE
 // ─────────────────────────────────────────
@@ -613,7 +653,7 @@ async fn run_turn(
             for model in non_mod {
                 let app2 = app.clone();
                 let client2 = client.clone();
-                let msgs2 = to_chat_msgs(&messages_snap);
+                let msgs2 = with_system_prompt(&model, &messages_snap);
                 let room2 = room_id.to_string();
                 let model2 = model.clone();
                 let app3 = app.clone();
@@ -649,7 +689,7 @@ async fn run_turn(
 
             let (_tx, cancel_rx) = oneshot::channel::<()>();
             let auth_rr: tauri::State<AuthState> = app.state();
-            let content = connector::stream_model(app, &client, &*auth_rr, room_id, &model, &to_chat_msgs(&messages_snap), cancel_rx)
+            let content = connector::stream_model(app, &client, &*auth_rr, room_id, &model, &with_system_prompt(&model, &messages_snap), cancel_rx)
                 .await.unwrap_or_else(|e| format!("(error: {})", e));
 
             let mut eng = engine.lock().await;
@@ -710,7 +750,8 @@ async fn run_turn(
                     let target = decision.target_model.clone()
                         .unwrap_or_else(|| non_mod.first().cloned().unwrap_or_default());
                     if !target.is_empty() {
-                        let msgs = to_chat_msgs(&engine.lock().await.rooms.get(room_id).map(|r| r.messages.clone()).unwrap_or_default());
+                        let msgs_raw = engine.lock().await.rooms.get(room_id).map(|r| r.messages.clone()).unwrap_or_default();
+                        let msgs = with_system_prompt(&target, &msgs_raw);
                         let auth_ls: tauri::State<AuthState> = app.state();
                         let (_tx, rx) = oneshot::channel::<()>();
                         let content = connector::stream_model(app, &client, &*auth_ls, room_id, &target, &msgs, rx)

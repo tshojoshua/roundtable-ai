@@ -211,21 +211,74 @@ pub async fn call_claude_web(
     messages: &[ChatMessage],
 ) -> Result<String, String> {
     let session_key = auth.get_key("anthropic-web").await
-        .ok_or("No Claude session. Go to ⚙️ Providers → Import from Claude Desktop.")?;
-    let prompt = messages.iter()
-        .map(|m| format!("[{}]: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let resp: serde_json::Value = client
-        .post("https://claude.ai/api/append_message")
+        .ok_or("No Claude session. Go to ⚙️ Providers → Re-import Claude Session.")?;
+
+    // Step 1: Create a new conversation
+    let org_resp: serde_json::Value = client
+        .get("https://claude.ai/api/organizations")
         .header("Cookie", format!("sessionKey={}", session_key))
-        .header("Referer", "https://claude.ai/")
+        .header("User-Agent", "Mozilla/5.0")
+        .send().await.map_err(|e| format!("claude.ai org fetch: {}", e))?
+        .json().await.map_err(|e| format!("claude.ai org parse: {}", e))?;
+
+    let org_id = org_resp[0]["uuid"].as_str()
+        .ok_or("claude.ai: could not get org ID — session may be expired, re-import it")?
+        .to_string();
+
+    let conv_id = uuid_v4();
+    client.post(format!("https://claude.ai/api/organizations/{}/chat_conversations", org_id))
+        .header("Cookie", format!("sessionKey={}", session_key))
         .header("Content-Type", "application/json")
-        .json(&json!({ "prompt": prompt, "model": "claude-opus-4-5", "attachments": [] }))
-        .send().await.map_err(|e| e.to_string())?
-        .json().await.map_err(|e| e.to_string())?;
-    Ok(resp["completion"].as_str()
-        .unwrap_or("(no response from Claude web)").to_string())
+        .header("User-Agent", "Mozilla/5.0")
+        .json(&json!({ "uuid": conv_id, "name": "" }))
+        .send().await.map_err(|e| format!("claude.ai conv create: {}", e))?;
+
+    // Step 2: Send message with SSE, collect completion
+    let prompt = messages.iter()
+        .filter(|m| m.role == "user")
+        .last()
+        .map(|m| m.content.as_str())
+        .unwrap_or("");
+
+    let resp = client
+        .post(format!("https://claude.ai/api/organizations/{}/chat_conversations/{}/completion", org_id, conv_id))
+        .header("Cookie", format!("sessionKey={}", session_key))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "Mozilla/5.0")
+        .json(&json!({
+            "prompt": prompt,
+            "model": "claude-opus-4-5",
+            "attachments": [],
+            "files": []
+        }))
+        .send().await.map_err(|e| format!("claude.ai completion: {}", e))?;
+
+    let body = resp.text().await.map_err(|e| format!("claude.ai read body: {}", e))?;
+
+    // Parse SSE stream — find completion_stop event
+    let mut result = String::new();
+    for line in body.lines() {
+        if line.starts_with("data: ") {
+            let data = &line[6..];
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                if v["type"] == "content_block_delta" {
+                    if let Some(t) = v["delta"]["text"].as_str() {
+                        result.push_str(t);
+                    }
+                }
+                if v["type"] == "completion" {
+                    if let Some(t) = v["completion"].as_str() {
+                        result = t.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    if result.is_empty() {
+        return Err("claude.ai returned empty response — session may be expired, try re-importing".into());
+    }
+    Ok(result)
 }
 
 // ─────────────────────────────────────────
@@ -365,6 +418,14 @@ pub async fn stream_model(
 
     if model_id == "claude-web" {
         let content = call_claude_web(client, auth, messages).await?;
+        app.emit("stream-start", json!({"room_id": room_id, "speaker": model_id})).ok();
+        app.emit("stream-delta", json!({"room_id": room_id, "speaker": model_id, "delta": content.clone()})).ok();
+        app.emit("stream-end", json!({"room_id": room_id, "speaker": model_id, "content": content.clone(), "cancelled": false})).ok();
+        return Ok(content);
+    }
+
+    if model_id == "grok-web" {
+        let content = call_grok_web(client, auth, messages).await?;
         app.emit("stream-start", json!({"room_id": room_id, "speaker": model_id})).ok();
         app.emit("stream-delta", json!({"room_id": room_id, "speaker": model_id, "delta": content.clone()})).ok();
         app.emit("stream-end", json!({"room_id": room_id, "speaker": model_id, "content": content.clone(), "cancelled": false})).ok();
