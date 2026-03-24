@@ -125,29 +125,37 @@ async fn call_erin(
     let base = auth.get_key("erin-endpoint").await
         .unwrap_or_else(|| "http://10.1.1.19:5000".into());
 
-    // Build conversation — inject a hard system prompt first so ERIN
-    // stays in conference moderator mode and doesn't hallucinate context
-    let system = "You are ERIN, moderating a Roundtable AI conference. Respond ONLY to what is asked in this specific conversation. Do NOT reference previous sessions, other projects, or invent context. Be direct, concise, and factual. Stay focused on the current question only.";
+    // Send only the last user message to ERIN — she has her own identity
+    // and system prompt already. Injecting rules causes her to echo them back.
+    // Build context from prior messages, send latest as the message.
+    let last_user = messages.iter().rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.as_str())
+        .unwrap_or("");
 
-    let history: Vec<String> = messages.iter()
-        .map(|m| {
-            match m.role.as_str() {
-                "system" => format!("[SYSTEM]: {}", m.content),
-                "user" => format!("[User]: {}", m.content),
-                _ => format!("[{}]: {}", m.role, m.content),
-            }
-        })
+    // Build conversation context from non-user messages (AI responses so far)
+    let context: Vec<String> = messages.iter()
+        .filter(|m| m.role != "user" && m.role != "system" && !m.content.is_empty())
+        .map(|m| format!("[{}]: {}", m.role, m.content))
         .collect();
+    let context_str = if context.is_empty() {
+        String::new()
+    } else {
+        context.join("\n\n")
+    };
 
-    let prompt = format!("[SYSTEM]: {}\n\n{}", system, history.join("\n\n"));
+    let mut body = json!({
+        "message": last_user,
+        "conversation_id": uuid_v4()
+    });
+    if !context_str.is_empty() {
+        body["context"] = serde_json::Value::String(context_str);
+    }
 
     let resp: serde_json::Value = client
         .post(format!("{}/api/chat", base))
         .header("Content-Type", "application/json")
-        .json(&json!({
-            "message": prompt,
-            "conversation_id": uuid_v4()
-        }))
+        .json(&body)
         .send().await
         .map_err(|e| format!("ERIN unreachable at {}: {}", base, e))?
         .json().await
